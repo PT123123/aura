@@ -13,6 +13,19 @@ export component SettingsWindow inherits Window {
     in-out property <int> format-index: 0;
     in-out property <int> jpeg-quality: 90;
     in-out property <string> sources-summary: "";
+    in-out property <bool> wallhaven-enabled: false;
+    in-out property <string> wallhaven-query: "";
+    in-out property <bool> wallhaven-cat-general: true;
+    in-out property <bool> wallhaven-cat-people: true;
+    in-out property <bool> wallhaven-cat-anime: true;
+    in-out property <bool> wallhaven-purity-sfw: true;
+    in-out property <bool> wallhaven-purity-sketchy: false;
+    in-out property <bool> wallhaven-purity-nsfw: false;
+    in-out property <int> wallhaven-sorting-index: 0;
+    in-out property <int> wallhaven-top-range-index: 3;
+    in-out property <int> wallhaven-atleast-index: 0;
+    in-out property <int> wallhaven-max-items: 24;
+    in-out property <string> wallhaven-api-key: "";
     in-out property <bool> updater-enabled: true;
     in-out property <int> updater-interval-secs: 21600;
     in-out property <string> feed-url: "";
@@ -160,6 +173,77 @@ export component SettingsWindow inherits Window {
                     }
                 }
 
+                GroupBox {
+                    title: "Wallhaven 壁纸源";
+                    VerticalBox {
+                        spacing: 8px;
+                        CheckBox {
+                            text: "启用 Wallhaven 源";
+                            checked: root.wallhaven-enabled;
+                            toggled => { root.wallhaven-enabled = self.checked; }
+                        }
+                        HorizontalBox {
+                            spacing: 8px;
+                            Text { text: "查询关键词"; color: #e0e0e0; vertical-alignment: center; }
+                            LineEdit { text: root.wallhaven-query; edited => { root.wallhaven-query = self.text; } }
+                        }
+                        GroupBox {
+                            title: "分类 Categories";
+                            VerticalBox {
+                                spacing: 4px;
+                                CheckBox { text: "general 通用"; checked: root.wallhaven-cat-general; toggled => { root.wallhaven-cat-general = self.checked; } }
+                                CheckBox { text: "people 人物"; checked: root.wallhaven-cat-people; toggled => { root.wallhaven-cat-people = self.checked; } }
+                                CheckBox { text: "anime 动漫"; checked: root.wallhaven-cat-anime; toggled => { root.wallhaven-cat-anime = self.checked; } }
+                            }
+                        }
+                        GroupBox {
+                            title: "纯度 Purity";
+                            VerticalBox {
+                                spacing: 4px;
+                                CheckBox { text: "SFW 安全"; checked: root.wallhaven-purity-sfw; toggled => { root.wallhaven-purity-sfw = self.checked; } }
+                                CheckBox { text: "Sketchy 草稿"; checked: root.wallhaven-purity-sketchy; toggled => { root.wallhaven-purity-sketchy = self.checked; } }
+                                CheckBox { text: "NSFW 成人"; checked: root.wallhaven-purity-nsfw; toggled => { root.wallhaven-purity-nsfw = self.checked; } }
+                            }
+                        }
+                        HorizontalBox {
+                            spacing: 8px;
+                            Text { text: "排序"; color: #e0e0e0; vertical-alignment: center; }
+                            ComboBox {
+                                model: ["date_added 最新", "relevance 相关", "random 随机", "views 浏览量", "favorites 收藏", "toplist 榜单"];
+                                current-index: root.wallhaven-sorting-index;
+                                selected => { root.wallhaven-sorting-index = self.current-index; }
+                            }
+                        }
+                        HorizontalBox {
+                            spacing: 8px;
+                            Text { text: "时间范围"; color: #e0e0e0; vertical-alignment: center; }
+                            ComboBox {
+                                model: ["1d 一天", "3d 三天", "1w 一周", "1M 一月", "3M 三月", "6M 半年", "1y 一年"];
+                                current-index: root.wallhaven-top-range-index;
+                                selected => { root.wallhaven-top-range-index = self.current-index; }
+                            }
+                        }
+                        HorizontalBox {
+                            spacing: 8px;
+                            Text { text: "最小分辨率"; color: #e0e0e0; vertical-alignment: center; }
+                            ComboBox {
+                                model: ["不限制", "1920x1080", "2560x1440", "3840x2160"];
+                                current-index: root.wallhaven-atleast-index;
+                                selected => { root.wallhaven-atleast-index = self.current-index; }
+                            }
+                        }
+                        HorizontalBox {
+                            spacing: 8px;
+                            Text { text: "拉取数量"; color: #e0e0e0; vertical-alignment: center; }
+                            SpinBox { minimum: 1; maximum: 1000; value: root.wallhaven-max-items; edited => { root.wallhaven-max-items = self.value; } }
+                        }
+                        HorizontalBox {
+                            spacing: 8px;
+                            Text { text: "API Key（可选）"; color: #e0e0e0; vertical-alignment: center; }
+                            LineEdit { text: root.wallhaven-api-key; edited => { root.wallhaven-api-key = self.text; } }
+                        }
+                    }
+                }
                 GroupBox {
                     title: "通用 General";
                     VerticalBox {

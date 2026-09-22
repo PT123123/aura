@@ -150,17 +150,32 @@ pub async fn resolve_image_path(download_dir: &Path, image_url: &str) -> Result<
     }
 }
 
-fn shared_client() -> &'static Client {
+pub(crate) fn shared_client() -> &'static Client {
     static CLIENT: OnceLock<Client> = OnceLock::new();
     CLIENT.get_or_init(|| {
         // reqwest's provider-neutral rustls feature keeps Linux builds on the
         // portable ring backend instead of requiring the AWS-LC C toolchain.
         // A provider may already have been installed by another TLS consumer.
         let _ = rustls::crypto::ring::default_provider().install_default();
-        Client::builder()
+        let mut builder = Client::builder()
             .user_agent("aura/0.1 (+https://example.invalid)")
             .connect_timeout(Duration::from_secs(10))
-            .timeout(Duration::from_secs(30))
+            .timeout(Duration::from_secs(30));
+
+        // reqwest does not consult the HTTP(S)_PROXY environment variables by
+        // default (and 0.13 dropped system-proxy discovery entirely), so read
+        // them explicitly to let remote sources (RSS, Wallhaven) work behind
+        // a local proxy.
+        for variable in ["HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"] {
+            if let Ok(proxy_url) = std::env::var(variable) {
+                if let Ok(proxy) = reqwest::Proxy::all(&proxy_url) {
+                    builder = builder.proxy(proxy);
+                    break;
+                }
+            }
+        }
+
+        builder
             .build()
             .expect("RSS HTTP client must build")
     })

@@ -1,5 +1,6 @@
 pub mod directory;
 pub mod rss;
+pub mod wallhaven;
 pub mod single;
 
 use crate::cache::CacheManager;
@@ -11,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::SystemTime;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Origin {
     File,
     Directory,
@@ -23,6 +24,7 @@ pub enum SourceKind {
     File,
     Directory,
     Rss,
+    Wallhaven,
 }
 
 #[derive(Debug, Clone)]
@@ -163,6 +165,12 @@ pub fn build_sources(
                         .with_context(|| format!("failed to initialize RSS cache for {url}"))?
                 };
                 sources.push(Box::new(rss::RssSource::new(url.clone(), *max_items, dir)?));
+            }
+            SourceConfig::Wallhaven { .. } => {
+                let dir = cache
+                    .ensure_remote_source_dir("wallhaven")
+                    .with_context(|| "failed to initialize Wallhaven cache")?;
+                sources.push(Box::new(wallhaven::WallhavenSource::new(source, dir)?));
             }
         }
     }

@@ -147,6 +147,98 @@ fn fill_ui_from_config(ui: &SettingsWindow, config: &AuraConfig) {
     });
     ui.set_cache_dir(config.cache_dir.to_string_lossy().into_owned().into());
     ui.set_state_file(config.state_file.to_string_lossy().into_owned().into());
+    fill_wallhaven_from_config(ui, config);
+}
+
+fn parse_list(value: &Option<String>) -> Vec<String> {
+    value
+        .iter()
+        .flat_map(|v| v.split(','))
+        .map(|part| part.trim().to_ascii_lowercase())
+        .filter(|part| !part.is_empty())
+        .collect()
+}
+
+fn fill_wallhaven_from_config(ui: &SettingsWindow, config: &AuraConfig) {
+    let found = config.image.sources.iter().find_map(|source| match source {
+        SourceConfig::Wallhaven {
+            query,
+            categories,
+            purity,
+            sorting,
+            top_range,
+            atleast,
+            max_items,
+            api_key,
+        } => Some((
+            query.clone(),
+            categories.clone(),
+            purity.clone(),
+            sorting.clone(),
+            top_range.clone(),
+            atleast.clone(),
+            *max_items,
+            api_key.clone(),
+        )),
+        _ => None,
+    });
+
+    let (query, categories, purity, sorting, top_range, atleast, max_items, api_key) =
+        match found {
+            Some(values) => values,
+            None => {
+                ui.set_wallhaven_enabled(false);
+                ui.set_wallhaven_query("".into());
+                ui.set_wallhaven_cat_general(true);
+                ui.set_wallhaven_cat_people(true);
+                ui.set_wallhaven_cat_anime(true);
+                ui.set_wallhaven_purity_sfw(true);
+                ui.set_wallhaven_purity_sketchy(false);
+                ui.set_wallhaven_purity_nsfw(false);
+                ui.set_wallhaven_sorting_index(0);
+                ui.set_wallhaven_top_range_index(3);
+                ui.set_wallhaven_atleast_index(0);
+                ui.set_wallhaven_max_items(24);
+                ui.set_wallhaven_api_key("".into());
+                return;
+            }
+        };
+
+    ui.set_wallhaven_enabled(true);
+    ui.set_wallhaven_query(query.unwrap_or_default().into());
+    let cats = parse_list(&categories);
+    ui.set_wallhaven_cat_general(cats.contains(&"general".to_string()));
+    ui.set_wallhaven_cat_people(cats.contains(&"people".to_string()));
+    ui.set_wallhaven_cat_anime(cats.contains(&"anime".to_string()));
+    let purity_values = parse_list(&purity);
+    ui.set_wallhaven_purity_sfw(purity_values.contains(&"sfw".to_string()));
+    ui.set_wallhaven_purity_sketchy(purity_values.contains(&"sketchy".to_string()));
+    ui.set_wallhaven_purity_nsfw(purity_values.contains(&"nsfw".to_string()));
+    ui.set_wallhaven_sorting_index(match sorting.as_deref() {
+        Some("relevance") => 1,
+        Some("random") => 2,
+        Some("views") => 3,
+        Some("favorites") => 4,
+        Some("toplist") => 5,
+        _ => 0,
+    });
+    ui.set_wallhaven_top_range_index(match top_range.as_deref() {
+        Some("1d") => 0,
+        Some("3d") => 1,
+        Some("1w") => 2,
+        Some("3M") => 4,
+        Some("6M") => 5,
+        Some("1y") => 6,
+        _ => 3,
+    });
+    ui.set_wallhaven_atleast_index(match atleast.as_deref() {
+        Some("1920x1080") => 1,
+        Some("2560x1440") => 2,
+        Some("3840x2160") => 3,
+        _ => 0,
+    });
+    ui.set_wallhaven_max_items(max_items.min(1000) as i32);
+    ui.set_wallhaven_api_key(api_key.unwrap_or_default().into());
 }
 
 fn secs_to_i32(duration: std::time::Duration) -> i32 {
@@ -181,6 +273,26 @@ fn source_summary(sources: &[SourceConfig]) -> String {
             SourceConfig::Rss {
                 url, max_items, ..
             } => format!("{}. RSS: {}（最多 {} 项）", index + 1, url, max_items),
+            SourceConfig::Wallhaven {
+                query,
+                categories,
+                purity,
+                sorting,
+                max_items,
+                ..
+            } => {
+                let query = query.clone().unwrap_or_default();
+                let query = if query.is_empty() { "全部".to_string() } else { query };
+                format!(
+                    "{}. Wallhaven: {}（{} / {} / {}，最多 {} 项）",
+                    index + 1,
+                    query,
+                    categories.as_deref().unwrap_or("全部"),
+                    purity.as_deref().unwrap_or("sfw"),
+                    sorting.as_deref().unwrap_or("date_added"),
+                    max_items
+                )
+            }
         };
         lines.push(line);
     }
@@ -229,6 +341,8 @@ fn save_config_from_ui(ui: &SettingsWindow, config_path: &Path) -> Result<()> {
     )?;
     set_object_string(&mut root, "updater", "feedUrl", &ui.get_feed_url())?;
     set_object_string(&mut root, "", "log_level", log_level_str(ui.get_log_level_index()))?;
+
+    save_wallhaven_to_root(&mut root, ui)?;
 
     let serialized = hcl::to_string(&root).context("failed to serialize config")?;
     std::fs::write(config_path, serialized)
@@ -316,6 +430,124 @@ fn set_object_bool(root: &mut hcl::Value, object: &str, key: &str, value: bool) 
     set_in_object_bool(ensure_object(root, object)?, key, value)
 }
 
+/// Synchronises the Wallhaven source entry inside `image.sources`.
+///
+/// When the UI toggle is enabled, an existing `type = "wallhaven"` entry is
+/// updated (or appended); when disabled, any wallhaven entry is removed.
+/// Other source entries are left untouched.
+fn save_wallhaven_to_root(root: &mut hcl::Value, ui: &SettingsWindow) -> Result<()> {
+    let enabled = ui.get_wallhaven_enabled();
+    let image = ensure_object(root, "image")?;
+
+    let had_sources = image.contains_key("sources");
+    if !had_sources && !enabled {
+        return Ok(());
+    }
+    if !had_sources {
+        image.insert("sources".to_string(), hcl::Value::Array(Vec::new()));
+    }
+
+    let sources = image
+        .get_mut("sources")
+        .and_then(|value| value.as_array_mut())
+        .context("image.sources is not an array")?;
+
+    sources.retain(|value| {
+        !(value
+            .as_object()
+            .and_then(|map| map.get("type"))
+            .and_then(|kind| kind.as_str())
+            == Some("wallhaven"))
+    });
+
+    if !enabled {
+        return Ok(());
+    }
+
+    let mut entry = hcl::Map::new();
+    entry.insert("type".to_string(), hcl::Value::from("wallhaven"));
+
+    let query = ui.get_wallhaven_query().trim().to_string();
+    if !query.is_empty() {
+        entry.insert("query".to_string(), hcl::Value::from(query));
+    }
+
+    let mut categories = Vec::new();
+    if ui.get_wallhaven_cat_general() {
+        categories.push("general");
+    }
+    if ui.get_wallhaven_cat_people() {
+        categories.push("people");
+    }
+    if ui.get_wallhaven_cat_anime() {
+        categories.push("anime");
+    }
+    if !categories.is_empty() {
+        entry.insert(
+            "categories".to_string(),
+            hcl::Value::from(categories.join(",")),
+        );
+    }
+
+    let mut purity = Vec::new();
+    if ui.get_wallhaven_purity_sfw() {
+        purity.push("sfw");
+    }
+    if ui.get_wallhaven_purity_sketchy() {
+        purity.push("sketchy");
+    }
+    if ui.get_wallhaven_purity_nsfw() {
+        purity.push("nsfw");
+    }
+    if !purity.is_empty() {
+        entry.insert("purity".to_string(), hcl::Value::from(purity.join(",")));
+    }
+
+    let sorting = match ui.get_wallhaven_sorting_index() {
+        1 => "relevance",
+        2 => "random",
+        3 => "views",
+        4 => "favorites",
+        5 => "toplist",
+        _ => "date_added",
+    };
+    entry.insert("sorting".to_string(), hcl::Value::from(sorting));
+
+    if sorting == "toplist" {
+        let top_range = match ui.get_wallhaven_top_range_index() {
+            0 => "1d",
+            1 => "3d",
+            2 => "1w",
+            4 => "3M",
+            5 => "6M",
+            6 => "1y",
+            _ => "1M",
+        };
+        entry.insert("topRange".to_string(), hcl::Value::from(top_range));
+    }
+
+    let atleast = match ui.get_wallhaven_atleast_index() {
+        1 => "1920x1080",
+        2 => "2560x1440",
+        3 => "3840x2160",
+        _ => "",
+    };
+    if !atleast.is_empty() {
+        entry.insert("atleast".to_string(), hcl::Value::from(atleast));
+    }
+
+    let max_items = ui.get_wallhaven_max_items().clamp(1, 1000);
+    entry.insert("maxItems".to_string(), hcl::Value::from(max_items as i64));
+
+    let api_key = ui.get_wallhaven_api_key().trim().to_string();
+    if !api_key.is_empty() {
+        entry.insert("apiKey".to_string(), hcl::Value::from(api_key));
+    }
+
+    sources.push(hcl::Value::from(entry));
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -390,5 +622,79 @@ unknown_root_key = 42
         );
         assert_eq!(field(&reparsed, &["unknown_root_key"]).and_then(|v| v.as_u64()), Some(42));
         assert!(field(&reparsed, &["image", "sources"]).is_some_and(|v| v.is_array()));
+    }
+
+    fn find_wallhaven_entry<'a>(root: &'a hcl::Value) -> Option<&'a hcl::Map<String, hcl::Value>> {
+        let sources = root.as_object()?.get("image")?.as_object()?.get("sources")?.as_array()?;
+        sources.iter().find_map(|value| {
+            let map = value.as_object()?;
+            if map.get("type")?.as_str() == Some("wallhaven") {
+                Some(map)
+            } else {
+                None
+            }
+        })
+    }
+
+    #[test]
+    fn wallhaven_save_writes_entry_when_enabled() {
+        let ui = SettingsWindow::new().expect("settings window should be creatable in test");
+        ui.set_wallhaven_enabled(true);
+        ui.set_wallhaven_query("aurora".into());
+        ui.set_wallhaven_cat_general(true);
+        ui.set_wallhaven_cat_people(false);
+        ui.set_wallhaven_cat_anime(true);
+        ui.set_wallhaven_purity_sfw(true);
+        ui.set_wallhaven_purity_sketchy(false);
+        ui.set_wallhaven_purity_nsfw(false);
+        ui.set_wallhaven_sorting_index(5);
+        ui.set_wallhaven_top_range_index(3);
+        ui.set_wallhaven_atleast_index(1);
+        ui.set_wallhaven_max_items(10);
+        ui.set_wallhaven_api_key("".into());
+
+        let mut root: hcl::Value = hcl::from_str(
+            r#"image = { sources = [ { type = "rss", url = "https://example.com/feed" } ] }"#,
+        )
+        .expect("parse should succeed");
+        save_wallhaven_to_root(&mut root, &ui).expect("save should succeed");
+
+        let entry = find_wallhaven_entry(&root).expect("wallhaven entry should exist");
+        assert_eq!(entry.get("type").and_then(|v| v.as_str()), Some("wallhaven"));
+        assert_eq!(entry.get("query").and_then(|v| v.as_str()), Some("aurora"));
+        assert_eq!(entry.get("categories").and_then(|v| v.as_str()), Some("general,anime"));
+        assert_eq!(entry.get("purity").and_then(|v| v.as_str()), Some("sfw"));
+        assert_eq!(entry.get("sorting").and_then(|v| v.as_str()), Some("toplist"));
+        assert_eq!(entry.get("topRange").and_then(|v| v.as_str()), Some("1M"));
+        assert_eq!(entry.get("atleast").and_then(|v| v.as_str()), Some("1920x1080"));
+        assert_eq!(entry.get("maxItems").and_then(|v| v.as_u64()), Some(10));
+        assert!(!entry.contains_key("apiKey"));
+
+        // RSS entry must be untouched
+        let sources = root
+            .as_object()
+            .and_then(|m| m.get("image"))
+            .and_then(|m| m.as_object())
+            .and_then(|m| m.get("sources"))
+            .and_then(|v| v.as_array())
+            .expect("sources array");
+        assert_eq!(sources.len(), 2);
+
+        // now disable: wallhaven entry is removed, rss stays
+        ui.set_wallhaven_enabled(false);
+        save_wallhaven_to_root(&mut root, &ui).expect("save should succeed");
+        assert!(find_wallhaven_entry(&root).is_none());
+        let sources = root
+            .as_object()
+            .and_then(|m| m.get("image"))
+            .and_then(|m| m.as_object())
+            .and_then(|m| m.get("sources"))
+            .and_then(|v| v.as_array())
+            .expect("sources array");
+        assert_eq!(sources.len(), 1);
+        assert_eq!(
+            sources[0].as_object().and_then(|m| m.get("type")).and_then(|v| v.as_str()),
+            Some("rss")
+        );
     }
 }

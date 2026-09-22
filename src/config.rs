@@ -97,6 +97,21 @@ enum RawSourceConfig {
         #[serde(flatten)]
         extra: hcl::Map<String, hcl::Value>,
     },
+    Wallhaven {
+        query: Option<String>,
+        categories: Option<String>,
+        purity: Option<String>,
+        sorting: Option<String>,
+        #[serde(rename = "topRange")]
+        top_range: Option<String>,
+        atleast: Option<String>,
+        #[serde(rename = "maxItems")]
+        max_items: Option<usize>,
+        #[serde(rename = "apiKey")]
+        api_key: Option<String>,
+        #[serde(flatten)]
+        extra: hcl::Map<String, hcl::Value>,
+    },
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -165,6 +180,16 @@ pub enum SourceConfig {
         url: String,
         max_items: usize,
         download_dir: Option<PathBuf>,
+    },
+    Wallhaven {
+        query: Option<String>,
+        categories: Option<String>,
+        purity: Option<String>,
+        sorting: Option<String>,
+        top_range: Option<String>,
+        atleast: Option<String>,
+        max_items: usize,
+        api_key: Option<String>,
     },
 }
 
@@ -791,7 +816,8 @@ fn warn_unknown_source_keys(
     match source {
         RawSourceConfig::File { extra, .. }
         | RawSourceConfig::Directory { extra, .. }
-        | RawSourceConfig::Rss { extra, .. } => warn_unknown_keys(source_path, extra, warnings),
+        | RawSourceConfig::Rss { extra, .. }
+        | RawSourceConfig::Wallhaven { extra, .. } => warn_unknown_keys(source_path, extra, warnings),
     }
 }
 
@@ -971,6 +997,26 @@ fn validate_source(source: RawSourceConfig, config_parent: &Path) -> Result<Sour
                 download_dir,
             })
         }
+        RawSourceConfig::Wallhaven {
+            query,
+            categories,
+            purity,
+            sorting,
+            top_range,
+            atleast,
+            max_items,
+            api_key,
+            ..
+        } => Ok(SourceConfig::Wallhaven {
+            query,
+            categories,
+            purity,
+            sorting,
+            top_range,
+            atleast,
+            max_items: max_items.unwrap_or(24).clamp(1, 1000),
+            api_key,
+        }),
     }
 }
 
