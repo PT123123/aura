@@ -4,7 +4,7 @@ export component SettingsWindow inherits Window {
     title: "Aura Settings";
     width: 620px;
     height: 760px;
-    background: #f5f6f8;
+    background: #1e1e1e;
 
     // ---- editable properties, synced from Rust ----
     in-out property <int> renderer-index: 0;
@@ -44,7 +44,7 @@ export component SettingsWindow inherits Window {
                     VerticalBox {
                         HorizontalBox {
                             spacing: 8px;
-                            Text { text: "模式"; vertical-alignment: center; }
+                            Text { text: "模式"; color: #e0e0e0; vertical-alignment: center; }
                             ComboBox {
                                 model: ["图片 Image", "着色器 Shader"];
                                 current-index: root.renderer-index;
@@ -60,17 +60,17 @@ export component SettingsWindow inherits Window {
                         spacing: 8px;
                         HorizontalBox {
                             spacing: 8px;
-                            Text { text: "轮换间隔 (秒)"; vertical-alignment: center; }
+                            Text { text: "轮换间隔 (秒)"; color: #e0e0e0; vertical-alignment: center; }
                             SpinBox { minimum: 5; maximum: 86400; value: root.image-timer-secs; edited => { root.image-timer-secs = round(self.value); } }
                         }
                         HorizontalBox {
                             spacing: 8px;
-                            Text { text: "远程更新间隔 (秒)"; vertical-alignment: center; }
+                            Text { text: "远程更新间隔 (秒)"; color: #e0e0e0; vertical-alignment: center; }
                             SpinBox { minimum: 60; maximum: 86400; value: root.remote-update-secs; edited => { root.remote-update-secs = round(self.value); } }
                         }
                         HorizontalBox {
                             spacing: 8px;
-                            Text { text: "输出格式"; vertical-alignment: center; }
+                            Text { text: "输出格式"; color: #e0e0e0; vertical-alignment: center; }
                             ComboBox {
                                 model: ["png", "jpg"];
                                 current-index: root.format-index;
@@ -79,13 +79,14 @@ export component SettingsWindow inherits Window {
                         }
                         HorizontalBox {
                             spacing: 8px;
-                            Text { text: "JPEG 质量"; vertical-alignment: center; }
+                            Text { text: "JPEG 质量"; color: #e0e0e0; vertical-alignment: center; }
                             SpinBox { minimum: 1; maximum: 100; value: root.jpeg-quality; edited => { root.jpeg-quality = round(self.value); } }
                         }
                         GroupBox {
                             title: "图片来源 Sources";
                             Text {
                                 text: root.sources-summary;
+                                color: #c8c8c8;
                                 wrap: word-wrap;
                             }
                         }
@@ -98,17 +99,17 @@ export component SettingsWindow inherits Window {
                         spacing: 8px;
                         HorizontalBox {
                             spacing: 8px;
-                            Text { text: "名称"; vertical-alignment: center; }
+                            Text { text: "名称"; color: #e0e0e0; vertical-alignment: center; }
                             LineEdit { text: root.shader-name; edited => { root.shader-name = self.text; } }
                         }
                         HorizontalBox {
                             spacing: 8px;
-                            Text { text: "目标帧率"; vertical-alignment: center; }
+                            Text { text: "目标帧率"; color: #e0e0e0; vertical-alignment: center; }
                             SpinBox { minimum: 1; maximum: 240; value: root.shader-fps; edited => { root.shader-fps = round(self.value); } }
                         }
                         HorizontalBox {
                             spacing: 8px;
-                            Text { text: "分辨率 (%)"; vertical-alignment: center; }
+                            Text { text: "分辨率 (%)"; color: #e0e0e0; vertical-alignment: center; }
                             SpinBox { minimum: 10; maximum: 100; value: root.shader-resolution; edited => { root.shader-resolution = round(self.value); } }
                         }
                         CheckBox {
@@ -118,7 +119,7 @@ export component SettingsWindow inherits Window {
                         }
                         HorizontalBox {
                             spacing: 8px;
-                            Text { text: "桌面范围"; vertical-alignment: center; }
+                            Text { text: "桌面范围"; color: #e0e0e0; vertical-alignment: center; }
                             ComboBox {
                                 model: ["virtual", "primary"];
                                 current-index: root.shader-scope-index;
@@ -127,7 +128,7 @@ export component SettingsWindow inherits Window {
                         }
                         HorizontalBox {
                             spacing: 8px;
-                            Text { text: "色彩空间"; vertical-alignment: center; }
+                            Text { text: "色彩空间"; color: #e0e0e0; vertical-alignment: center; }
                             ComboBox {
                                 model: ["unorm", "srgb"];
                                 current-index: root.shader-color-space-index;
@@ -148,12 +149,12 @@ export component SettingsWindow inherits Window {
                         }
                         HorizontalBox {
                             spacing: 8px;
-                            Text { text: "检查间隔 (秒)"; vertical-alignment: center; }
+                            Text { text: "检查间隔 (秒)"; color: #e0e0e0; vertical-alignment: center; }
                             SpinBox { minimum: 60; maximum: 604800; value: root.updater-interval-secs; edited => { root.updater-interval-secs = round(self.value); } }
                         }
                         HorizontalBox {
                             spacing: 8px;
-                            Text { text: "更新源 URL"; vertical-alignment: center; }
+                            Text { text: "更新源 URL"; color: #e0e0e0; vertical-alignment: center; }
                             LineEdit { text: root.feed-url; edited => { root.feed-url = self.text; } }
                         }
                     }
@@ -165,7 +166,7 @@ export component SettingsWindow inherits Window {
                         spacing: 8px;
                         HorizontalBox {
                             spacing: 8px;
-                            Text { text: "日志级别"; vertical-alignment: center; }
+                            Text { text: "日志级别"; color: #e0e0e0; vertical-alignment: center; }
                             ComboBox {
                                 model: ["error", "warn", "info", "debug", "trace"];
                                 current-index: root.log-level-index;
@@ -174,12 +175,12 @@ export component SettingsWindow inherits Window {
                         }
                         HorizontalBox {
                             spacing: 8px;
-                            Text { text: "缓存目录"; vertical-alignment: center; }
+                            Text { text: "缓存目录"; color: #e0e0e0; vertical-alignment: center; }
                             LineEdit { text: root.cache-dir; enabled: false; }
                         }
                         HorizontalBox {
                             spacing: 8px;
-                            Text { text: "状态文件"; vertical-alignment: center; }
+                            Text { text: "状态文件"; color: #e0e0e0; vertical-alignment: center; }
                             LineEdit { text: root.state-file; enabled: false; }
                         }
                     }
@@ -194,6 +195,6 @@ export component SettingsWindow inherits Window {
             Button { text: "打开配置文件"; clicked => { root.open-config-file(); } }
         }
 
-        Text { text: root.status-text; color: #555555; wrap: word-wrap; }
+        Text { text: root.status-text; color: #9a9a9a; wrap: word-wrap; }
     }
 }
