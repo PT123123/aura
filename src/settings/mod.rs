@@ -24,6 +24,41 @@ slint::include_modules!();
 
 static SETTINGS_WINDOW_OPEN: AtomicBool = AtomicBool::new(false);
 
+/// Slint/winit binds the platform to the first thread that creates a window,
+/// so every test that constructs a Slint window must run on one shared worker
+/// thread. Panics are forwarded back to the calling test thread.
+#[cfg(test)]
+pub(crate) fn run_slint_test(test: impl FnOnce() + Send + 'static) {
+    use std::panic::AssertUnwindSafe;
+    use std::sync::mpsc;
+    use std::sync::OnceLock;
+
+    type Job = Box<dyn FnOnce() + Send>;
+    static QUEUE: OnceLock<mpsc::Sender<Job>> = OnceLock::new();
+
+    let tx = QUEUE.get_or_init(|| {
+        let (tx, rx) = mpsc::channel::<Job>();
+        std::thread::spawn(move || {
+            while let Ok(job) = rx.recv() {
+                job();
+            }
+        });
+        tx
+    });
+
+    let (done_tx, done_rx) = mpsc::channel();
+    tx.send(Box::new(move || {
+        let result = std::panic::catch_unwind(AssertUnwindSafe(test));
+        let _ = done_tx.send(result);
+    }))
+    .expect("slint test worker thread has exited");
+
+    match done_rx.recv().expect("slint test worker thread has exited") {
+        Ok(()) => {}
+        Err(payload) => std::panic::resume_unwind(payload),
+    }
+}
+
 pub fn open_settings_window(config_path: PathBuf, reload_tx: UnboundedSender<TrayEvent>) {
     if SETTINGS_WINDOW_OPEN.swap(true, Ordering::SeqCst) {
         info!("settings window is already open; ignoring duplicate request");
@@ -638,63 +673,65 @@ unknown_root_key = 42
 
     #[test]
     fn wallhaven_save_writes_entry_when_enabled() {
-        let ui = SettingsWindow::new().expect("settings window should be creatable in test");
-        ui.set_wallhaven_enabled(true);
-        ui.set_wallhaven_query("aurora".into());
-        ui.set_wallhaven_cat_general(true);
-        ui.set_wallhaven_cat_people(false);
-        ui.set_wallhaven_cat_anime(true);
-        ui.set_wallhaven_purity_sfw(true);
-        ui.set_wallhaven_purity_sketchy(false);
-        ui.set_wallhaven_purity_nsfw(false);
-        ui.set_wallhaven_sorting_index(5);
-        ui.set_wallhaven_top_range_index(3);
-        ui.set_wallhaven_atleast_index(1);
-        ui.set_wallhaven_max_items(10);
-        ui.set_wallhaven_api_key("".into());
+        crate::settings::run_slint_test(|| {
+            let ui = SettingsWindow::new().expect("settings window should be creatable in test");
+            ui.set_wallhaven_enabled(true);
+            ui.set_wallhaven_query("aurora".into());
+            ui.set_wallhaven_cat_general(true);
+            ui.set_wallhaven_cat_people(false);
+            ui.set_wallhaven_cat_anime(true);
+            ui.set_wallhaven_purity_sfw(true);
+            ui.set_wallhaven_purity_sketchy(false);
+            ui.set_wallhaven_purity_nsfw(false);
+            ui.set_wallhaven_sorting_index(5);
+            ui.set_wallhaven_top_range_index(3);
+            ui.set_wallhaven_atleast_index(1);
+            ui.set_wallhaven_max_items(10);
+            ui.set_wallhaven_api_key("".into());
 
-        let mut root: hcl::Value = hcl::from_str(
-            r#"image = { sources = [ { type = "rss", url = "https://example.com/feed" } ] }"#,
-        )
-        .expect("parse should succeed");
-        save_wallhaven_to_root(&mut root, &ui).expect("save should succeed");
+            let mut root: hcl::Value = hcl::from_str(
+                r#"image = { sources = [ { type = "rss", url = "https://example.com/feed" } ] }"#,
+            )
+            .expect("parse should succeed");
+            save_wallhaven_to_root(&mut root, &ui).expect("save should succeed");
 
-        let entry = find_wallhaven_entry(&root).expect("wallhaven entry should exist");
-        assert_eq!(entry.get("type").and_then(|v| v.as_str()), Some("wallhaven"));
-        assert_eq!(entry.get("query").and_then(|v| v.as_str()), Some("aurora"));
-        assert_eq!(entry.get("categories").and_then(|v| v.as_str()), Some("general,anime"));
-        assert_eq!(entry.get("purity").and_then(|v| v.as_str()), Some("sfw"));
-        assert_eq!(entry.get("sorting").and_then(|v| v.as_str()), Some("toplist"));
-        assert_eq!(entry.get("topRange").and_then(|v| v.as_str()), Some("1M"));
-        assert_eq!(entry.get("atleast").and_then(|v| v.as_str()), Some("1920x1080"));
-        assert_eq!(entry.get("maxItems").and_then(|v| v.as_u64()), Some(10));
-        assert!(!entry.contains_key("apiKey"));
+            let entry = find_wallhaven_entry(&root).expect("wallhaven entry should exist");
+            assert_eq!(entry.get("type").and_then(|v| v.as_str()), Some("wallhaven"));
+            assert_eq!(entry.get("query").and_then(|v| v.as_str()), Some("aurora"));
+            assert_eq!(entry.get("categories").and_then(|v| v.as_str()), Some("general,anime"));
+            assert_eq!(entry.get("purity").and_then(|v| v.as_str()), Some("sfw"));
+            assert_eq!(entry.get("sorting").and_then(|v| v.as_str()), Some("toplist"));
+            assert_eq!(entry.get("topRange").and_then(|v| v.as_str()), Some("1M"));
+            assert_eq!(entry.get("atleast").and_then(|v| v.as_str()), Some("1920x1080"));
+            assert_eq!(entry.get("maxItems").and_then(|v| v.as_u64()), Some(10));
+            assert!(!entry.contains_key("apiKey"));
 
-        // RSS entry must be untouched
-        let sources = root
-            .as_object()
-            .and_then(|m| m.get("image"))
-            .and_then(|m| m.as_object())
-            .and_then(|m| m.get("sources"))
-            .and_then(|v| v.as_array())
-            .expect("sources array");
-        assert_eq!(sources.len(), 2);
+            // RSS entry must be untouched
+            let sources = root
+                .as_object()
+                .and_then(|m| m.get("image"))
+                .and_then(|m| m.as_object())
+                .and_then(|m| m.get("sources"))
+                .and_then(|v| v.as_array())
+                .expect("sources array");
+            assert_eq!(sources.len(), 2);
 
-        // now disable: wallhaven entry is removed, rss stays
-        ui.set_wallhaven_enabled(false);
-        save_wallhaven_to_root(&mut root, &ui).expect("save should succeed");
-        assert!(find_wallhaven_entry(&root).is_none());
-        let sources = root
-            .as_object()
-            .and_then(|m| m.get("image"))
-            .and_then(|m| m.as_object())
-            .and_then(|m| m.get("sources"))
-            .and_then(|v| v.as_array())
-            .expect("sources array");
-        assert_eq!(sources.len(), 1);
-        assert_eq!(
-            sources[0].as_object().and_then(|m| m.get("type")).and_then(|v| v.as_str()),
-            Some("rss")
-        );
+            // now disable: wallhaven entry is removed, rss stays
+            ui.set_wallhaven_enabled(false);
+            save_wallhaven_to_root(&mut root, &ui).expect("save should succeed");
+            assert!(find_wallhaven_entry(&root).is_none());
+            let sources = root
+                .as_object()
+                .and_then(|m| m.get("image"))
+                .and_then(|m| m.as_object())
+                .and_then(|m| m.get("sources"))
+                .and_then(|v| v.as_array())
+                .expect("sources array");
+            assert_eq!(sources.len(), 1);
+            assert_eq!(
+                sources[0].as_object().and_then(|m| m.get("type")).and_then(|v| v.as_str()),
+                Some("rss")
+            );
+        });
     }
 }

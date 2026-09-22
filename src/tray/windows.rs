@@ -13,14 +13,7 @@ use windows_sys::Win32::Foundation::{
     CloseHandle, GetLastError, ERROR_ALREADY_EXISTS, HANDLE, HINSTANCE, HWND, LPARAM, LRESULT,
     POINT, WPARAM,
 };
-use windows_sys::Win32::Graphics::Gdi::{
-    CreateSolidBrush, DeleteObject, FillRect, SetBkMode, SetTextColor, TextOutW, TRANSPARENT,
-    HGDIOBJ,
-};
-use windows_sys::Win32::UI::Controls::{
-    DRAWITEMSTRUCT, MEASUREITEMSTRUCT, ODS_SELECTED, ODT_MENU,
-};
-use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
 use windows_sys::Win32::System::Threading::CreateMutexW;
 use windows_sys::Win32::UI::Shell::{
     ShellExecuteW, Shell_NotifyIconW, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE,
@@ -31,10 +24,10 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     GetCursorPos, GetWindowLongPtrW, InsertMenuItemW, LoadIconW, LoadImageW, PeekMessageW,
     PostMessageW, RegisterClassW, SetForegroundWindow, SetWindowLongPtrW, TrackPopupMenu,
     TranslateMessage, GWLP_USERDATA, HICON, IDI_APPLICATION, IMAGE_ICON, LR_DEFAULTSIZE,
-    LR_SHARED, MENUITEMINFOW, MFT_OWNERDRAW, MFT_SEPARATOR, MIIM_FTYPE, MIIM_ID, MSG, PM_REMOVE,
-    SW_SHOWNORMAL, TPM_LEFTALIGN, TPM_NOANIMATION, TPM_RETURNCMD, TPM_RIGHTBUTTON, WM_APP,
-    WM_DRAWITEM, WM_LBUTTONDBLCLK, WM_MEASUREITEM, WM_NCCREATE, WM_NCDESTROY, WM_NULL,
-    WM_RBUTTONUP, WNDCLASSW, WS_EX_NOACTIVATE,
+    LR_SHARED, MENUITEMINFOW, MFT_SEPARATOR, MFT_STRING, MIIM_FTYPE, MIIM_ID, MIIM_STRING, MSG,
+    PM_REMOVE, SW_SHOWNORMAL, TPM_LEFTALIGN, TPM_NOANIMATION, TPM_RETURNCMD, TPM_RIGHTBUTTON,
+    WM_APP, WM_LBUTTONDBLCLK, WM_NCCREATE, WM_NCDESTROY, WM_NULL, WM_RBUTTONUP, WNDCLASSW,
+    WS_EX_NOACTIVATE,
 };
 
 const TRAY_ICON_ID: u32 = 1;
@@ -46,8 +39,23 @@ const TRAY_COMMAND_RELOAD_SETTINGS: u32 = 1001;
 const TRAY_COMMAND_CHOOSE_WALLPAPER: u32 = 1003;
 const TRAY_COMMAND_SETTINGS: u32 = 1004;
 const TRAY_COMMAND_EXIT: u32 = 1005;
-const MENU_ITEM_WIDTH: u32 = 200;
-const MENU_ITEM_HEIGHT: u32 = 30;
+
+/// Opts the process into dark mode so native popup menus render dark.
+/// Uses the undocumented `SetPreferredAppMode` export from uxtheme.dll
+/// (ordinal 135); without it, TrackPopupMenu stays light-themed with
+/// unreadable light text on a white background.
+unsafe fn enable_dark_mode_for_menus() {
+    let uxtheme = GetModuleHandleW(wide_null("uxtheme.dll").as_ptr());
+    if uxtheme.is_null() {
+        return;
+    }
+    let Some(proc) = GetProcAddress(uxtheme, 135usize as *const u8) else {
+        return;
+    };
+    let set_preferred_app_mode: unsafe extern "system" fn(i32) -> i32 =
+        std::mem::transmute(proc);
+    set_preferred_app_mode(1); // PreferredAppMode::AllowDark
+}
 
 pub struct SingleInstanceGuard {
     handle: HANDLE,
@@ -122,12 +130,6 @@ pub fn spawn(
     })
 }
 
-/// A single owner-drawn tray menu item. Text is kept as a null-terminated
-/// wide string; `WM_DRAWITEM` renders it on a dark background.
-struct OwnedMenuItem {
-    text: Vec<u16>,
-}
-
 struct WindowData {
     event_tx: UnboundedSender<TrayEvent>,
     session_stats: Arc<SessionStats>,
@@ -141,6 +143,9 @@ fn run_tray_loop(
     shutdown_rx: Receiver<()>,
     ready_tx: Sender<Result<()>>,
 ) -> Result<()> {
+    unsafe {
+        enable_dark_mode_for_menus();
+    }
     let class_name = wide_null("aura_tray_window");
     let hinstance: HINSTANCE = unsafe { GetModuleHandleW(ptr::null()) };
 
@@ -258,23 +263,6 @@ unsafe extern "system" fn wnd_proc(
             }
             return 0;
         }
-        WM_MEASUREITEM => {
-            let measure = lparam as *mut MEASUREITEMSTRUCT;
-            if !measure.is_null() {
-                (*measure).itemWidth = MENU_ITEM_WIDTH as u32;
-                (*measure).itemHeight = MENU_ITEM_HEIGHT as u32;
-            }
-            return 0;
-        }
-        WM_DRAWITEM => {
-            let draw = lparam as *mut DRAWITEMSTRUCT;
-            if !draw.is_null() && (*draw).CtlType == ODT_MENU {
-                unsafe {
-                    draw_owned_menu_item(draw);
-                }
-            }
-            return 0;
-        }
         WM_NCDESTROY => {
             let ptr_value = GetWindowLongPtrW(hwnd, GWLP_USERDATA);
             if ptr_value != 0 {
@@ -318,97 +306,86 @@ unsafe fn show_context_menu(hwnd: HWND, data: &mut WindowData) {
         return;
     }
 
-    loop {
-        let menu = CreatePopupMenu();
-        if menu.is_null() {
-            tracing::warn!("CreatePopupMenu failed");
-            return;
-        }
-
-        // Owner-draw items: reserve capacity up front so the pointers stored
-        // in dwItemData stay valid for the whole TrackPopupMenu call.
-        let mut owned_items: Vec<OwnedMenuItem> = Vec::with_capacity(5);
-        owned_items.push(OwnedMenuItem {
-            text: wide_null("设置下一个背景"),
-        });
-        owned_items.push(OwnedMenuItem { text: wide_null("选择壁纸") });
-        owned_items.push(OwnedMenuItem {
-            text: wide_null("重新加载设置"),
-        });
-        owned_items.push(OwnedMenuItem { text: wide_null("设置") });
-        owned_items.push(OwnedMenuItem { text: wide_null("退出") });
-
-        let mut position: u32 = 0;
-        if !data.session_stats.is_shader_active() {
-            if !insert_owned_menu_item(
-                menu,
-                position,
-                TRAY_COMMAND_NEXT_BACKGROUND,
-                &owned_items[0] as *const OwnedMenuItem as usize,
-            ) {
-                tracing::warn!("failed to add Next Background tray menu item");
-            }
-            position += 1;
-        }
-        if !insert_owned_menu_item(
-            menu,
-            position,
-            TRAY_COMMAND_CHOOSE_WALLPAPER,
-            &owned_items[1] as *const OwnedMenuItem as usize,
-        ) {
-            tracing::warn!("failed to add Choose Wallpaper tray menu item");
-        }
-        position += 1;
-        if !insert_owned_menu_item(
-            menu,
-            position,
-            TRAY_COMMAND_RELOAD_SETTINGS,
-            &owned_items[2] as *const OwnedMenuItem as usize,
-        ) {
-            tracing::warn!("failed to add Reload Settings tray menu item");
-        }
-        position += 1;
-        if !insert_owned_menu_item(
-            menu,
-            position,
-            TRAY_COMMAND_SETTINGS,
-            &owned_items[3] as *const OwnedMenuItem as usize,
-        ) {
-            tracing::warn!("failed to add Settings tray menu item");
-        }
-        position += 1;
-        if !insert_separator_menu_item(menu, position) {
-            tracing::warn!("failed to add separator tray menu item");
-        }
-        position += 1;
-        if !insert_owned_menu_item(
-            menu,
-            position,
-            TRAY_COMMAND_EXIT,
-            &owned_items[4] as *const OwnedMenuItem as usize,
-        ) {
-            tracing::warn!("failed to add Exit tray menu item");
-        }
-
-        SetForegroundWindow(hwnd);
-        let selected_command = TrackPopupMenu(
-            menu,
-            TPM_LEFTALIGN | TPM_RIGHTBUTTON | TPM_RETURNCMD | TPM_NOANIMATION,
-            anchor_point.x,
-            anchor_point.y,
-            0,
-            hwnd,
-            ptr::null(),
-        );
-        if selected_command != 0 {
-            handle_tray_command(hwnd, data, selected_command as u32);
-        }
-        PostMessageW(hwnd, WM_NULL, 0, 0);
-
-        DestroyMenu(menu);
-
-        break;
+    let menu = CreatePopupMenu();
+    if menu.is_null() {
+        tracing::warn!("CreatePopupMenu failed");
+        return;
     }
+
+    let next_background_label = wide_null("设置下一个背景");
+    let choose_wallpaper_label = wide_null("选择壁纸");
+    let reload_settings_label = wide_null("重新加载设置");
+    let settings_label = wide_null("设置");
+    let exit_label = wide_null("退出");
+
+    let mut position: u32 = 0;
+    if !data.session_stats.is_shader_active() {
+        if !insert_command_menu_item(
+            menu,
+            position,
+            TRAY_COMMAND_NEXT_BACKGROUND,
+            next_background_label.as_ptr(),
+        ) {
+            tracing::warn!("failed to add Next Background tray menu item");
+        }
+        position += 1;
+    }
+    if !insert_command_menu_item(
+        menu,
+        position,
+        TRAY_COMMAND_CHOOSE_WALLPAPER,
+        choose_wallpaper_label.as_ptr(),
+    ) {
+        tracing::warn!("failed to add Choose Wallpaper tray menu item");
+    }
+    position += 1;
+    if !insert_command_menu_item(
+        menu,
+        position,
+        TRAY_COMMAND_RELOAD_SETTINGS,
+        reload_settings_label.as_ptr(),
+    ) {
+        tracing::warn!("failed to add Reload Settings tray menu item");
+    }
+    position += 1;
+    if !insert_command_menu_item(
+        menu,
+        position,
+        TRAY_COMMAND_SETTINGS,
+        settings_label.as_ptr(),
+    ) {
+        tracing::warn!("failed to add Settings tray menu item");
+    }
+    position += 1;
+    if !insert_separator_menu_item(menu, position) {
+        tracing::warn!("failed to add separator tray menu item");
+    }
+    position += 1;
+    if !insert_command_menu_item(
+        menu,
+        position,
+        TRAY_COMMAND_EXIT,
+        exit_label.as_ptr(),
+    ) {
+        tracing::warn!("failed to add Exit tray menu item");
+    }
+
+    SetForegroundWindow(hwnd);
+    let selected_command = TrackPopupMenu(
+        menu,
+        TPM_LEFTALIGN | TPM_RIGHTBUTTON | TPM_RETURNCMD | TPM_NOANIMATION,
+        anchor_point.x,
+        anchor_point.y,
+        0,
+        hwnd,
+        ptr::null(),
+    );
+    if selected_command != 0 {
+        handle_tray_command(hwnd, data, selected_command as u32);
+    }
+    PostMessageW(hwnd, WM_NULL, 0, 0);
+
+    DestroyMenu(menu);
 }
 
 unsafe fn handle_tray_command(_hwnd: HWND, data: &mut WindowData, command_id: u32) {
@@ -452,18 +429,18 @@ pub fn open_settings(path: &Path) -> Result<()> {
     Ok(())
 }
 
-unsafe fn insert_owned_menu_item(
+unsafe fn insert_command_menu_item(
     menu: windows_sys::Win32::UI::WindowsAndMessaging::HMENU,
     position: u32,
     command_id: u32,
-    item_data: usize,
+    label: *const u16,
 ) -> bool {
     let mut menu_item: MENUITEMINFOW = std::mem::zeroed();
     menu_item.cbSize = size_of::<MENUITEMINFOW>() as u32;
-    menu_item.fMask = MIIM_ID | MIIM_FTYPE;
-    menu_item.fType = MFT_OWNERDRAW;
+    menu_item.fMask = MIIM_ID | MIIM_STRING | MIIM_FTYPE;
+    menu_item.fType = MFT_STRING;
     menu_item.wID = command_id;
-    menu_item.dwItemData = item_data;
+    menu_item.dwTypeData = label as *mut u16;
     InsertMenuItemW(menu, position, 1, &menu_item) != 0
 }
 
@@ -506,47 +483,6 @@ fn load_tray_icon(hinstance: HINSTANCE) -> HICON {
 
 fn make_int_resource(id: u16) -> *const u16 {
     id as usize as *const u16
-}
-
-fn color_ref(red: u32, green: u32, blue: u32) -> u32 {
-    red | (green << 8) | (blue << 16)
-}
-
-unsafe fn draw_owned_menu_item(draw: *mut DRAWITEMSTRUCT) {
-    if draw.is_null() {
-        return;
-    }
-    let item = (*draw).itemData as *const OwnedMenuItem;
-    if item.is_null() {
-        return;
-    }
-    let text = &(*item).text;
-    let text_len = text.len().saturating_sub(1) as i32;
-
-    let hdc = (*draw).hDC;
-    let rect = (*draw).rcItem;
-    let selected = (*draw).itemState & ODS_SELECTED != 0;
-
-    let background = if selected {
-        color_ref(0x3a, 0x3a, 0x3a)
-    } else {
-        color_ref(0x1e, 0x1e, 0x1e)
-    };
-    let brush = CreateSolidBrush(background);
-    if !brush.is_null() {
-        FillRect(hdc, &rect, brush);
-        DeleteObject(brush as HGDIOBJ);
-    }
-
-    let text_color = if selected {
-        color_ref(0xff, 0xff, 0xff)
-    } else {
-        color_ref(0xe8, 0xe8, 0xe8)
-    };
-    SetBkMode(hdc, TRANSPARENT as i32);
-    SetTextColor(hdc, text_color);
-    let text_y = rect.top + ((rect.bottom - rect.top - 16) / 2).max(0);
-    TextOutW(hdc, rect.left + 12, text_y, text.as_ptr(), text_len);
 }
 
 fn fill_tip(buf: &mut [u16], text: &str) {

@@ -1,4 +1,4 @@
-import { Button, CheckBox, ComboBox, GroupBox, HorizontalBox, LineEdit, ScrollView, SpinBox, VerticalBox } from "std-widgets.slint";
+import { Button, CheckBox, ComboBox, GroupBox, HorizontalBox, LineEdit, ScrollView, Spinner, SpinBox, VerticalBox } from "std-widgets.slint";
 
 export component SettingsWindow inherits Window {
     title: "Aura 设置";
@@ -283,167 +283,242 @@ export component SettingsWindow inherits Window {
     }
 }
 
-struct WallpaperEntry {
-    path: string,
-    thumb: image,
-    name: string,
-    favorited: bool,
-}
-
 struct WallpaperCell {
     path: string,
     thumb: image,
     name: string,
     favorited: bool,
-    row: int,
-    col: int,
 }
 
 export component WallpaperPickerWindow inherits Window {
     title: "选择壁纸";
-    width: 760px;
-    height: 620px;
+    preferred-width: 960px;
+    preferred-height: 680px;
+    min-width: 640px;
+    min-height: 480px;
     background: #1e1e1e;
 
     in property <[WallpaperCell]> cells: [];
     in property <[string]> monitor-names: [];
     in property <bool> loading: true;
-    in-out property <string> menu-path: "";
-    in-out property <bool> menu-favorited: false;
-    in-out property <bool> menu-visible: false;
-    in-out property <length> menu-x: 0px;
-    in-out property <length> menu-y: 0px;
+    in property <int> total-count: 0;
+    in property <int> shown-count: 0;
+    in-out property <string> search-text: "";
+    in-out property <bool> favorites-only: false;
+    in-out property <string> selected-path: "";
     callback apply-all(string);
     callback apply-to-monitor(string, int);
     callback add-favorite(string);
+    callback filter-changed(string, bool);
     callback close-window();
+
+    // ~210px per column with room for padding/spacing, clamped to 2–6 columns.
+    property <int> grid-cols: max(2, min(6, round((root.width - 58px) / 210px)));
+    out property <string> status-text: root.loading
+        ? "正在加载缩略图…"
+        : root.shown-count == 0
+            ? (root.total-count == 0 ? "暂无可用壁纸" : "没有匹配的壁纸，换个关键词试试")
+            : "显示 " + root.shown-count + " / " + root.total-count + " 张 · 单击选择，右键可应用到指定屏幕或收藏";
 
     VerticalBox {
         padding: 12px;
         spacing: 10px;
-        Text {
-            text: root.loading ? "正在加载缩略图…" : "右键壁纸可在菜单中「应用到某个屏幕」或「加入收藏」";
-            color: #d0d0d0;
-            font-size: 14px;
+
+        HorizontalBox {
+            spacing: 8px;
+            Text {
+                text: "选择壁纸";
+                color: #e0e0e0;
+                font-size: 15px;
+                font-weight: 600;
+                vertical-alignment: center;
+            }
+            LineEdit {
+                horizontal-stretch: 1;
+                placeholder-text: "搜索壁纸名称或路径…";
+                input-type: search;
+                text: root.search-text;
+                edited(text) => {
+                    root.search-text = text;
+                    root.filter-changed(text, root.favorites-only);
+                }
+            }
+            CheckBox {
+                text: "仅收藏";
+                checked: root.favorites-only;
+                toggled => {
+                    root.favorites-only = self.checked;
+                    root.filter-changed(root.search-text, self.checked);
+                }
+            }
         }
-        ScrollView {
-            GridLayout {
-                spacing: 10px;
-                for cell in root.cells:
-                    Rectangle {
-                        row: cell.row;
-                        col: cell.col;
-                        background: #262626;
-                        border-radius: 6px;
-                        border-width: 1px;
-                        border-color: cell.favorited ? #d4a017 : #3a3a3a;
-                        VerticalBox {
-                            spacing: 4px;
-                            padding: 6px;
-                            TouchArea {
-                                mouse-cursor: pointer;
-                                pointer-event(event) => {
-                                    if (event.kind == PointerEventKind.down && event.button == PointerEventButton.right) {
-                                        root.menu-path = cell.path;
-                                        root.menu-favorited = cell.favorited;
-                                        root.menu-x = max(0px, min(540px, self.mouse-x - 70px));
-                                        root.menu-y = max(0px, min(420px, self.mouse-y - 12px));
-                                        root.menu-visible = true;
-                                    }
+
+        Rectangle {
+            vertical-stretch: 1;
+            background: #1e1e1e;
+
+            ScrollView {
+                visible: !root.loading && root.cells.length > 0;
+                GridLayout {
+                    padding: 4px;
+                    spacing: 10px;
+                    for cell[idx] in root.cells:
+                        ContextMenuArea {
+                            row: idx / root.grid-cols;
+                            col: Math.mod(idx, root.grid-cols);
+
+                            Menu {
+                                for name[monitor-idx] in root.monitor-names: MenuItem {
+                                    title: "应用到 " + name;
+                                    activated => { root.apply-to-monitor(cell.path, monitor-idx); }
                                 }
+                                MenuItem {
+                                    title: "应用到所有屏幕";
+                                    activated => { root.apply-all(cell.path); }
+                                }
+                                MenuSeparator {}
+                                MenuItem {
+                                    title: cell.favorited ? "取消收藏" : "加入收藏";
+                                    activated => { root.add-favorite(cell.path); }
+                                }
+                            }
+
+                            Rectangle {
+                                width: 100%;
+                                height: 100%;
+                                background: root.selected-path == cell.path
+                                    ? #31353d
+                                    : (select-touch.has-hover ? #2b2b2b : #262626);
+                                border-radius: 6px;
+                                border-width: 1px;
+                                border-color: root.selected-path == cell.path
+                                    ? #4a90d9
+                                    : (cell.favorited ? #d4a017 : (select-touch.has-hover ? #4a4a4a : #3a3a3a));
+                                clip: true;
+
+                                select-touch := TouchArea {
+                                    width: 100%;
+                                    height: 100%;
+                                    mouse-cursor: pointer;
+                                    clicked => { root.selected-path = cell.path; }
+                                }
+
                                 VerticalBox {
-                                    spacing: 4px;
-                                    Image {
-                                        source: cell.thumb;
-                                        height: 112px;
-                                        image-fit: cover;
-                                    }
-                                    HorizontalBox {
-                                        spacing: 4px;
-                                        Text {
-                                            text: cell.favorited ? "★" : "";
-                                            color: #d4a017;
-                                            vertical-alignment: center;
+                                    width: 100%;
+                                    height: 100%;
+                                    spacing: 0px;
+                                    padding: 0px;
+
+                                    Rectangle {
+                                        vertical-stretch: 1;
+                                        min-height: 100px;
+
+                                        Image {
+                                            source: cell.thumb;
+                                            width: 100%;
+                                            height: 100%;
+                                            image-fit: cover;
                                         }
+
+                                        Rectangle {
+                                            visible: cell.favorited;
+                                            x: parent.width - self.width - 6px;
+                                            y: 6px;
+                                            width: 24px;
+                                            height: 24px;
+                                            border-radius: 12px;
+                                            background: #000000aa;
+                                            Text {
+                                                text: "★";
+                                                color: #d4a017;
+                                                font-size: 12px;
+                                                horizontal-alignment: center;
+                                                vertical-alignment: center;
+                                            }
+                                        }
+
+                                        Rectangle {
+                                            y: parent.height - self.height;
+                                            width: 100%;
+                                            height: select-touch.has-hover || root.selected-path == cell.path ? 30px : 0px;
+                                            background: #000000c4;
+                                            TouchArea {
+                                                width: 100%;
+                                                height: 30px;
+                                                visible: select-touch.has-hover || root.selected-path == cell.path;
+                                                mouse-cursor: pointer;
+                                                clicked => { root.apply-all(cell.path); }
+                                                Text {
+                                                    text: "应用到全部屏幕";
+                                                    color: #f0f0f0;
+                                                    font-size: 12px;
+                                                    horizontal-alignment: center;
+                                                    vertical-alignment: center;
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    HorizontalBox {
+                                        padding: 6px;
+                                        spacing: 4px;
                                         Text {
                                             text: cell.name;
                                             color: #c8c8c8;
                                             font-size: 11px;
                                             overflow: elide;
                                             vertical-alignment: center;
-                                            horizontal-alignment: left;
+                                            horizontal-stretch: 1;
+                                        }
+                                        Text {
+                                            text: cell.favorited ? "★" : "";
+                                            color: #d4a017;
+                                            font-size: 11px;
+                                            vertical-alignment: center;
                                         }
                                     }
                                 }
                             }
-                            Button {
-                                text: "应用全部";
-                                height: 26px;
-                                clicked => { root.apply-all(cell.path); }
-                            }
                         }
+                }
+            }
+
+            if (root.loading || root.cells.length == 0): Rectangle {
+                width: 100%;
+                height: 100%;
+                VerticalBox {
+                    alignment: center;
+                    spacing: 8px;
+                    if (root.loading): Spinner {}
+                    Text {
+                        text: root.status-text;
+                        color: #9a9a9a;
+                        font-size: 14px;
+                        horizontal-alignment: center;
                     }
+                }
             }
         }
+
         HorizontalBox {
-            alignment: end;
+            spacing: 8px;
+            Text {
+                text: root.status-text;
+                color: #9a9a9a;
+                font-size: 12px;
+                overflow: elide;
+                vertical-alignment: center;
+                horizontal-stretch: 1;
+            }
+            Button {
+                text: "应用所选";
+                primary: root.selected-path != "";
+                enabled: root.selected-path != "" && !root.loading;
+                clicked => { root.apply-all(root.selected-path); }
+            }
             Button {
                 text: "关闭";
                 clicked => { root.close-window(); }
-            }
-        }
-    }
-
-    // Click-catcher behind the context menu: dismisses it.
-    Rectangle {
-        visible: root.menu-visible;
-        x: 0px;
-        y: 0px;
-        width: 100%;
-        height: 100%;
-        TouchArea {
-            width: 100%;
-            height: 100%;
-            clicked => { root.menu-visible = false; }
-        }
-    }
-
-    // Context menu for a wallpaper (apply-to-monitor / favorite).
-    Rectangle {
-        x: root.menu-x;
-        y: root.menu-y;
-        width: 200px;
-        visible: root.menu-visible;
-        background: #2b2b2b;
-        border-radius: 6px;
-        border-width: 1px;
-        border-color: #3f3f3f;
-        VerticalBox {
-            padding: 4px;
-            spacing: 2px;
-            for name[idx] in root.monitor-names: Button {
-                text: "应用到 " + name;
-                height: 28px;
-                clicked => {
-                    root.menu-visible = false;
-                    root.apply-to-monitor(root.menu-path, idx);
-                }
-            }
-            Button {
-                text: "应用到所有屏幕";
-                height: 28px;
-                clicked => {
-                    root.menu-visible = false;
-                    root.apply-all(root.menu-path);
-                }
-            }
-            Button {
-                text: root.menu-favorited ? "取消收藏" : "加入收藏";
-                height: 28px;
-                clicked => {
-                    root.menu-visible = false;
-                    root.add-favorite(root.menu-path);
-                }
             }
         }
     }
