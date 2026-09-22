@@ -1,12 +1,15 @@
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::RwLock;
 use std::time::{Duration, Instant};
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub enum TrayEvent {
     NextWallpaper,
     ReloadSettings,
     OpenSettings,
+    OpenWallpaperPicker,
+    ApplyWallpaper(PathBuf),
     CheckForUpdates,
     Exit,
 }

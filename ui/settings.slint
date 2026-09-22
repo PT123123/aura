@@ -1,4 +1,4 @@
-import { Button, CheckBox, ComboBox, GroupBox, HorizontalBox, LineEdit, ScrollView, SpinBox, VerticalBox } from "std-widgets.slint";
+import { Button, CheckBox, ComboBox, GroupBox, HorizontalBox, LineEdit, ListView, ScrollView, SpinBox, VerticalBox } from "std-widgets.slint";
 
 export component SettingsWindow inherits Window {
     title: "Aura Settings";
@@ -282,3 +282,65 @@ export component SettingsWindow inherits Window {
         Text { text: root.status-text; color: #9a9a9a; wrap: word-wrap; }
     }
 }
+
+struct WallpaperEntry {
+    path: string,
+    thumb: image,
+    name: string,
+}
+
+export component WallpaperPickerWindow inherits Window {
+    title: "选择壁纸";
+    width: 720px;
+    height: 560px;
+    background: #1e1e1e;
+
+    in property <[WallpaperEntry]> entries: [];
+    callback choose(string);
+    callback request_close();
+
+    VerticalBox {
+        padding: 12px;
+        spacing: 10px;
+        Text {
+            text: "点击「应用」把壁纸设置到所有屏幕";
+            color: #d0d0d0;
+            font-size: 14px;
+        }
+        ScrollView {
+            ListView {
+                for entry in root.entries: HorizontalBox {
+                    padding: 4px;
+                    spacing: 10px;
+                    Image {
+                        source: entry.thumb;
+                        width: 200px;
+                        height: 112px;
+                        image-fit: cover;
+                    }
+                    VerticalBox {
+                        Text {
+                            text: entry.name;
+                            color: #c8c8c8;
+                            font-size: 12px;
+                            vertical-alignment: center;
+                            horizontal-alignment: left;
+                        }
+                    }
+                    Button {
+                        text: "应用";
+                        clicked => { root.choose(entry.path); }
+                    }
+                }
+            }
+        }
+        HorizontalBox {
+            alignment: end;
+            Button {
+                text: "关闭";
+                clicked => { root.request_close(); }
+            }
+        }
+    }
+}
+

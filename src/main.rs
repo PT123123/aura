@@ -26,6 +26,7 @@ mod tray;
 mod updater;
 mod version;
 mod wallpaper;
+mod wallpaper_picker;
 
 use crate::cache::CacheManager;
 use crate::config::{load_from_path_with_warnings, ConfigWarning, RendererMode, ShaderConfig};
@@ -791,6 +792,54 @@ async fn run(args: Vec<String>, debug_requested: bool) -> Result<()> {
                         #[cfg(not(windows))]
                         if let Err(error) = tray::open_settings(&config_path) {
                             warn!(error = %error, path = %config_path.display(), "failed to open settings");
+                        }
+                    }
+                    Some(TrayEvent::OpenWallpaperPicker) => {
+                        #[cfg(windows)]
+                        {
+                            let remote_images = match cache.list_remote_images() {
+                                Ok(images) => images,
+                                Err(error) => {
+                                    warn!(error = %error, "failed to list remote cache images");
+                                    Vec::new()
+                                }
+                            };
+                            let local_images =
+                                wallpaper_picker::collect_local_images(&config.image.sources);
+                            crate::wallpaper_picker::open_wallpaper_picker(
+                                remote_images,
+                                local_images,
+                                tray_event_tx.clone(),
+                            );
+                        }
+                        #[cfg(not(windows))]
+                        warn!("wallpaper picker is only supported on Windows");
+                    }
+                    Some(TrayEvent::ApplyWallpaper(path)) => {
+                        if active_mode != ActiveMode::Image {
+                            warn!("picked wallpaper ignored while shader mode is active");
+                            continue;
+                        }
+                        if !path.is_file() {
+                            warn!(path = %path.display(), "picked wallpaper no longer exists");
+                            continue;
+                        }
+                        match backend.set_wallpapers(&[path.as_path()]) {
+                            Ok(()) => {
+                                info!(path = %path.display(), "picked wallpaper applied to all displays");
+                                session_stats.inc_images_shown();
+                                last_image_id = Some(path.to_string_lossy().into_owned());
+                                if let Err(error) =
+                                    persist_state(&state_store, &rotation, last_image_id.clone())
+                                {
+                                    warn!(error = %error, "failed to persist state after picked wallpaper");
+                                }
+                            }
+                            Err(error) => warn!(
+                                error = %error,
+                                path = %path.display(),
+                                "failed to apply picked wallpaper"
+                            ),
                         }
                     }
                     Some(TrayEvent::Exit) => {

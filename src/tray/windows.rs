@@ -1,7 +1,5 @@
 use crate::errors::Result;
 use crate::tray::{format_running_duration, SessionStats, TrayEvent};
-use crate::updater::UpdaterStatus;
-use crate::version;
 use anyhow::{anyhow, bail};
 use std::mem::size_of;
 use std::path::{Path, PathBuf};
@@ -27,14 +25,14 @@ use windows_sys::Win32::UI::Shell::{
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu, DestroyWindow, DispatchMessageW,
-    DrawIconEx, GetCursorPos, GetWindowLongPtrW, InsertMenuItemW, KillTimer, LoadIconW, LoadImageW,
-    PeekMessageW, PostMessageW, RegisterClassW, SetForegroundWindow, SetMenuItemInfoW, SetTimer,
+    DrawIconEx, GetCursorPos, GetWindowLongPtrW, InsertMenuItemW, LoadIconW, LoadImageW,
+    PeekMessageW, PostMessageW, RegisterClassW, SetForegroundWindow,
     SetWindowLongPtrW, TrackPopupMenu, TranslateMessage, DI_NORMAL, GWLP_USERDATA, HICON,
     IDI_APPLICATION, IMAGE_BITMAP, IMAGE_ICON, LR_CREATEDIBSECTION, LR_DEFAULTSIZE, LR_SHARED,
-    MENUITEMINFOW, MFS_DISABLED, MFT_SEPARATOR, MFT_STRING, MIIM_BITMAP, MIIM_FTYPE, MIIM_ID,
-    MIIM_STATE, MIIM_STRING, MSG, PM_REMOVE, SW_SHOWNORMAL, TPM_LEFTALIGN, TPM_NOANIMATION,
+    MENUITEMINFOW, MFT_SEPARATOR, MFT_STRING, MIIM_BITMAP, MIIM_FTYPE, MIIM_ID, MIIM_STRING, MSG,
+    PM_REMOVE, SW_SHOWNORMAL, TPM_LEFTALIGN, TPM_NOANIMATION,
     TPM_RETURNCMD, TPM_RIGHTBUTTON, WM_APP, WM_LBUTTONDBLCLK, WM_NCCREATE, WM_NCDESTROY, WM_NULL,
-    WM_RBUTTONUP, WM_TIMER, WNDCLASSW, WS_EX_NOACTIVATE,
+    WM_RBUTTONUP, WNDCLASSW, WS_EX_NOACTIVATE,
 };
 
 const TRAY_ICON_ID: u32 = 1;
@@ -42,23 +40,18 @@ const WM_TRAYICON: u32 = WM_APP + 1;
 const SINGLE_INSTANCE_MUTEX_NAME: &str = "Local\\aura-tray-single-instance";
 const TRAY_ICON_RESOURCE_ID: u16 = 101;
 const NEXT_BACKGROUND_ICON_RESOURCE_ID: u16 = 203;
-const REFRESH_ICON_RESOURCE_ID: u16 = 204;
 const RELOAD_SETTINGS_ICON_RESOURCE_ID: u16 = 205;
 const SETTINGS_ICON_RESOURCE_ID: u16 = 201;
 const EXIT_ICON_RESOURCE_ID: u16 = 202;
 const NEXT_BACKGROUND_ICON_FALLBACK_RESOURCE_ID: u16 = 303;
-const REFRESH_ICON_FALLBACK_RESOURCE_ID: u16 = 304;
 const RELOAD_SETTINGS_ICON_FALLBACK_RESOURCE_ID: u16 = 305;
 const SETTINGS_ICON_FALLBACK_RESOURCE_ID: u16 = 301;
 const EXIT_ICON_FALLBACK_RESOURCE_ID: u16 = 302;
 const TRAY_COMMAND_NEXT_BACKGROUND: u32 = 1000;
 const TRAY_COMMAND_RELOAD_SETTINGS: u32 = 1001;
-const TRAY_COMMAND_CHECK_FOR_UPDATES: u32 = 1002;
+const TRAY_COMMAND_CHOOSE_WALLPAPER: u32 = 1003;
 const TRAY_COMMAND_SETTINGS: u32 = 1004;
 const TRAY_COMMAND_EXIT: u32 = 1005;
-const TRAY_MENU_REFRESH_TIMER_ID: usize = 1;
-const TRAY_MENU_REFRESH_INTERVAL_MS: u32 = 250;
-const TRAY_UPDATE_STATUS_MENU_POSITION: u32 = 2;
 const MENU_ICON_SIZE: i32 = 16;
 const RT_BITMAP_RESOURCE_TYPE: u16 = 2;
 const RT_GROUP_ICON_RESOURCE_TYPE: u16 = 14;
@@ -140,12 +133,6 @@ struct WindowData {
     event_tx: UnboundedSender<TrayEvent>,
     session_stats: Arc<SessionStats>,
     hinstance: HINSTANCE,
-    sticky_update_menu_active: bool,
-    reopen_menu_requested: bool,
-    last_app_update_status: String,
-    active_menu: windows_sys::Win32::UI::WindowsAndMessaging::HMENU,
-    active_menu_has_check_for_updates: bool,
-    update_status_menu_text_wide: Vec<u16>,
 }
 
 fn run_tray_loop(
@@ -175,12 +162,6 @@ fn run_tray_loop(
         event_tx,
         session_stats: session_stats.clone(),
         hinstance,
-        sticky_update_menu_active: false,
-        reopen_menu_requested: false,
-        last_app_update_status: session_stats.app_update_status(),
-        active_menu: ptr::null_mut(),
-        active_menu_has_check_for_updates: false,
-        update_status_menu_text_wide: wide_null(""),
     });
     let user_data_ptr = Box::into_raw(user_data);
 
@@ -278,40 +259,6 @@ unsafe extern "system" fn wnd_proc(
             }
             return 0;
         }
-        WM_TIMER => {
-            if wparam == TRAY_MENU_REFRESH_TIMER_ID {
-                if let Some(data) = get_window_data(hwnd) {
-                    if data.sticky_update_menu_active {
-                        let app_update_status = data.session_stats.app_update_status();
-                        if app_update_status != data.last_app_update_status {
-                            data.last_app_update_status = app_update_status.clone();
-                            if !data.active_menu.is_null()
-                                && !update_update_status_menu_row(data, &app_update_status)
-                            {
-                                tracing::warn!(
-                                    "failed to update Update Status tray menu row in place"
-                                );
-                            }
-                            if data.active_menu_has_check_for_updates
-                                && !data.active_menu.is_null()
-                                && !set_check_for_updates_menu_enabled(
-                                    data.active_menu,
-                                    !app_update_status_label_is_in_progress(&app_update_status),
-                                )
-                            {
-                                tracing::warn!(
-                                    "failed to update Check for Updates tray menu item state in place"
-                                );
-                            }
-                            if app_update_status_label_is_terminal(&app_update_status) {
-                                data.sticky_update_menu_active = false;
-                            }
-                        }
-                    }
-                }
-                return 0;
-            }
-        }
         WM_NCDESTROY => {
             let ptr_value = GetWindowLongPtrW(hwnd, GWLP_USERDATA);
             if ptr_value != 0 {
@@ -356,51 +303,21 @@ unsafe fn show_context_menu(hwnd: HWND, data: &mut WindowData) {
     }
 
     loop {
-        data.reopen_menu_requested = false;
         let menu = CreatePopupMenu();
         if menu.is_null() {
             tracing::warn!("CreatePopupMenu failed");
             return;
         }
 
-        let timer_value = data.session_stats.timer_display().to_string();
-        let remote_update_value = data.session_stats.remote_update_timer_display().to_string();
-        let app_update_value = data.session_stats.app_update_status();
-        let images_value = data.session_stats.total_images().to_string();
-        let shown_value = data.session_stats.images_shown().to_string();
-        let skipped_value = data.session_stats.manual_skips().to_string();
-        let running_value = format_running_duration(data.session_stats.running_duration());
-        let shader_name_value = data.session_stats.shader_name();
-        let app_version_value = version::get_version().full_version_number(false);
-
-        let app_version_label = wide_null(&app_version_value);
-        let timer_label = wide_null(&format_stat_row("Timer", &timer_value));
-        let remote_update_label =
-            wide_null(&format_stat_row("Remote Update", &remote_update_value));
-        let update_status_label = wide_null(&format_stat_row("Update Status", &app_update_value));
-        let images_label = wide_null(&format_stat_row("Images", &images_value));
-        let shown_label = wide_null(&format_stat_row("Shown", &shown_value));
-        let skipped_label = wide_null(&format_stat_row("Skipped", &skipped_value));
-        let running_label = wide_null(&format_stat_row("Running", &running_value));
-        let shader_label = wide_null(&format_stat_row("Shader", &shader_name_value));
-        let shader_active = data.session_stats.is_shader_active();
-        let show_check_for_updates = app_update_value != UpdaterStatus::Disabled.label()
-            && app_update_value != UpdaterStatus::Unsupported.label();
-        let allow_check_for_updates = !app_update_status_label_is_in_progress(&app_update_value);
         let next_background_label = wide_null("Next Background");
+        let choose_wallpaper_label = wide_null("Choose Wallpaper");
         let reload_settings_label = wide_null("Reload Settings");
-        let check_updates_label = wide_null("Check for Updates");
         let settings_label = wide_null("Settings");
         let exit_label = wide_null("Exit");
         let next_background_icon = load_menu_icon_bitmap(
             data.hinstance,
             NEXT_BACKGROUND_ICON_RESOURCE_ID,
             NEXT_BACKGROUND_ICON_FALLBACK_RESOURCE_ID,
-        );
-        let refresh_icon = load_menu_icon_bitmap(
-            data.hinstance,
-            REFRESH_ICON_RESOURCE_ID,
-            REFRESH_ICON_FALLBACK_RESOURCE_ID,
         );
         let reload_settings_icon = load_menu_icon_bitmap(
             data.hinstance,
@@ -419,58 +336,7 @@ unsafe fn show_context_menu(hwnd: HWND, data: &mut WindowData) {
         );
 
         let mut position: u32 = 0;
-        if !insert_disabled_menu_item(menu, position, app_version_label.as_ptr()) {
-            tracing::warn!("failed to add version tray menu item");
-        }
-        position += 1;
-        if !insert_separator_menu_item(menu, position) {
-            tracing::warn!("failed to add version separator tray menu item");
-        }
-        position += 1;
-        if !insert_disabled_menu_item(menu, position, update_status_label.as_ptr()) {
-            tracing::warn!("failed to add Update Status tray menu item");
-        }
-        position += 1;
-        if !insert_disabled_menu_item(menu, position, running_label.as_ptr()) {
-            tracing::warn!("failed to add Running tray menu item");
-        }
-        position += 1;
-        if !insert_separator_menu_item(menu, position) {
-            tracing::warn!("failed to add tray stats separator menu item");
-        }
-        position += 1;
-        if shader_active {
-            if !insert_disabled_menu_item(menu, position, shader_label.as_ptr()) {
-                tracing::warn!("failed to add Shader tray menu item");
-            }
-            position += 1;
-        } else {
-            if !insert_disabled_menu_item(menu, position, timer_label.as_ptr()) {
-                tracing::warn!("failed to add Timer tray menu item");
-            }
-            position += 1;
-            if !insert_disabled_menu_item(menu, position, remote_update_label.as_ptr()) {
-                tracing::warn!("failed to add Remote Update tray menu item");
-            }
-            position += 1;
-            if !insert_disabled_menu_item(menu, position, images_label.as_ptr()) {
-                tracing::warn!("failed to add Images tray menu item");
-            }
-            position += 1;
-            if !insert_disabled_menu_item(menu, position, shown_label.as_ptr()) {
-                tracing::warn!("failed to add Shown tray menu item");
-            }
-            position += 1;
-            if !insert_disabled_menu_item(menu, position, skipped_label.as_ptr()) {
-                tracing::warn!("failed to add Skipped tray menu item");
-            }
-            position += 1;
-        }
-        if !insert_separator_menu_item(menu, position) {
-            tracing::warn!("failed to add renderer-specific separator tray menu item");
-        }
-        position += 1;
-        if !shader_active {
+        if !data.session_stats.is_shader_active() {
             if !insert_command_menu_item(
                 menu,
                 position,
@@ -482,20 +348,16 @@ unsafe fn show_context_menu(hwnd: HWND, data: &mut WindowData) {
             }
             position += 1;
         }
-        if show_check_for_updates {
-            if !insert_command_menu_item(
-                menu,
-                position,
-                TRAY_COMMAND_CHECK_FOR_UPDATES,
-                check_updates_label.as_ptr(),
-                refresh_icon,
-            ) {
-                tracing::warn!("failed to add Check for Updates tray menu item");
-            } else if !set_check_for_updates_menu_enabled(menu, allow_check_for_updates) {
-                tracing::warn!("failed to set Check for Updates tray menu item state");
-            }
-            position += 1;
+        if !insert_command_menu_item(
+            menu,
+            position,
+            TRAY_COMMAND_CHOOSE_WALLPAPER,
+            choose_wallpaper_label.as_ptr(),
+            next_background_icon,
+        ) {
+            tracing::warn!("failed to add Choose Wallpaper tray menu item");
         }
+        position += 1;
         if !insert_command_menu_item(
             menu,
             position,
@@ -530,25 +392,7 @@ unsafe fn show_context_menu(hwnd: HWND, data: &mut WindowData) {
             tracing::warn!("failed to add Exit tray menu item");
         }
 
-        let timer_started = if data.sticky_update_menu_active {
-            data.last_app_update_status = app_update_value;
-            SetTimer(
-                hwnd,
-                TRAY_MENU_REFRESH_TIMER_ID,
-                TRAY_MENU_REFRESH_INTERVAL_MS,
-                None,
-            ) != 0
-        } else {
-            false
-        };
-        if data.sticky_update_menu_active && !timer_started {
-            tracing::warn!("failed to start tray menu refresh timer");
-            data.sticky_update_menu_active = false;
-        }
-
         SetForegroundWindow(hwnd);
-        data.active_menu = menu;
-        data.active_menu_has_check_for_updates = show_check_for_updates;
         let selected_command = TrackPopupMenu(
             menu,
             TPM_LEFTALIGN | TPM_RIGHTBUTTON | TPM_RETURNCMD | TPM_NOANIMATION,
@@ -558,11 +402,6 @@ unsafe fn show_context_menu(hwnd: HWND, data: &mut WindowData) {
             hwnd,
             ptr::null(),
         );
-        data.active_menu = ptr::null_mut();
-        data.active_menu_has_check_for_updates = false;
-        if timer_started {
-            KillTimer(hwnd, TRAY_MENU_REFRESH_TIMER_ID);
-        }
         if selected_command != 0 {
             handle_tray_command(hwnd, data, selected_command as u32);
         }
@@ -570,16 +409,10 @@ unsafe fn show_context_menu(hwnd: HWND, data: &mut WindowData) {
 
         DestroyMenu(menu);
         cleanup_menu_icon_bitmap(next_background_icon);
-        cleanup_menu_icon_bitmap(refresh_icon);
         cleanup_menu_icon_bitmap(reload_settings_icon);
         cleanup_menu_icon_bitmap(settings_icon);
         cleanup_menu_icon_bitmap(exit_icon);
 
-        if data.reopen_menu_requested {
-            continue;
-        }
-
-        data.sticky_update_menu_active = false;
         break;
     }
 }
@@ -589,17 +422,11 @@ unsafe fn handle_tray_command(_hwnd: HWND, data: &mut WindowData, command_id: u3
         TRAY_COMMAND_NEXT_BACKGROUND => {
             let _ = data.event_tx.send(TrayEvent::NextWallpaper);
         }
+        TRAY_COMMAND_CHOOSE_WALLPAPER => {
+            let _ = data.event_tx.send(TrayEvent::OpenWallpaperPicker);
+        }
         TRAY_COMMAND_RELOAD_SETTINGS => {
             let _ = data.event_tx.send(TrayEvent::ReloadSettings);
-        }
-        TRAY_COMMAND_CHECK_FOR_UPDATES => {
-            let checking_status = UpdaterStatus::Checking.label().to_string();
-            data.session_stats
-                .set_app_update_status(checking_status.clone());
-            data.last_app_update_status = checking_status;
-            data.sticky_update_menu_active = true;
-            data.reopen_menu_requested = true;
-            let _ = data.event_tx.send(TrayEvent::CheckForUpdates);
         }
         TRAY_COMMAND_SETTINGS => {
             let _ = data.event_tx.send(TrayEvent::OpenSettings);
@@ -662,48 +489,6 @@ unsafe fn insert_separator_menu_item(
     menu_item.fMask = MIIM_FTYPE;
     menu_item.fType = MFT_SEPARATOR;
     InsertMenuItemW(menu, position, 1, &menu_item) != 0
-}
-
-unsafe fn insert_disabled_menu_item(
-    menu: windows_sys::Win32::UI::WindowsAndMessaging::HMENU,
-    position: u32,
-    label: *const u16,
-) -> bool {
-    let mut menu_item: MENUITEMINFOW = std::mem::zeroed();
-    menu_item.cbSize = size_of::<MENUITEMINFOW>() as u32;
-    menu_item.fMask = MIIM_STRING | MIIM_FTYPE | MIIM_STATE;
-    menu_item.fType = MFT_STRING;
-    menu_item.fState = MFS_DISABLED;
-    menu_item.dwTypeData = label as *mut u16;
-    InsertMenuItemW(menu, position, 1, &menu_item) != 0
-}
-
-unsafe fn update_update_status_menu_row(data: &mut WindowData, app_update_status: &str) -> bool {
-    data.update_status_menu_text_wide =
-        wide_null(&format_stat_row("Update Status", app_update_status));
-
-    let mut menu_item: MENUITEMINFOW = std::mem::zeroed();
-    menu_item.cbSize = size_of::<MENUITEMINFOW>() as u32;
-    menu_item.fMask = MIIM_STRING;
-    menu_item.dwTypeData = data.update_status_menu_text_wide.as_mut_ptr();
-
-    SetMenuItemInfoW(
-        data.active_menu,
-        TRAY_UPDATE_STATUS_MENU_POSITION,
-        1,
-        &menu_item,
-    ) != 0
-}
-
-unsafe fn set_check_for_updates_menu_enabled(
-    menu: windows_sys::Win32::UI::WindowsAndMessaging::HMENU,
-    enabled: bool,
-) -> bool {
-    let mut menu_item: MENUITEMINFOW = std::mem::zeroed();
-    menu_item.cbSize = size_of::<MENUITEMINFOW>() as u32;
-    menu_item.fMask = MIIM_STATE;
-    menu_item.fState = if enabled { 0 } else { MFS_DISABLED };
-    SetMenuItemInfoW(menu, TRAY_COMMAND_CHECK_FOR_UPDATES, 0, &menu_item) != 0
 }
 
 fn load_menu_icon_bitmap(
@@ -876,22 +661,6 @@ fn make_int_resource(id: u16) -> *const u16 {
     id as usize as *const u16
 }
 
-fn format_stat_row(label: &str, value: &str) -> String {
-    format!("{label}\t{value}")
-}
-
-fn app_update_status_label_is_in_progress(status: &str) -> bool {
-    status == UpdaterStatus::Checking.label()
-        || status == UpdaterStatus::UpdateAvailable.label()
-        || status == UpdaterStatus::Installing.label()
-}
-
-fn app_update_status_label_is_terminal(status: &str) -> bool {
-    status == UpdaterStatus::UpToDate.label()
-        || status == UpdaterStatus::Error.label()
-        || status == UpdaterStatus::InstalledPendingRestart.label()
-}
-
 fn fill_tip(buf: &mut [u16], text: &str) {
     if buf.is_empty() {
         return;
@@ -908,44 +677,4 @@ fn fill_tip(buf: &mut [u16], text: &str) {
 
 fn wide_null(value: &str) -> Vec<u16> {
     value.encode_utf16().chain(std::iter::once(0)).collect()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn app_update_status_label_in_progress_set() {
-        assert!(app_update_status_label_is_in_progress(
-            UpdaterStatus::Checking.label()
-        ));
-        assert!(app_update_status_label_is_in_progress(
-            UpdaterStatus::UpdateAvailable.label()
-        ));
-        assert!(app_update_status_label_is_in_progress(
-            UpdaterStatus::Installing.label()
-        ));
-        assert!(!app_update_status_label_is_in_progress(
-            UpdaterStatus::InstalledPendingRestart.label()
-        ));
-        assert!(!app_update_status_label_is_in_progress(
-            UpdaterStatus::UpToDate.label()
-        ));
-    }
-
-    #[test]
-    fn app_update_status_label_terminal_set() {
-        assert!(app_update_status_label_is_terminal(
-            UpdaterStatus::UpToDate.label()
-        ));
-        assert!(app_update_status_label_is_terminal(
-            UpdaterStatus::Error.label()
-        ));
-        assert!(app_update_status_label_is_terminal(
-            UpdaterStatus::InstalledPendingRestart.label()
-        ));
-        assert!(!app_update_status_label_is_terminal(
-            UpdaterStatus::Checking.label()
-        ));
-    }
 }

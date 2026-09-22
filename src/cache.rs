@@ -51,6 +51,15 @@ impl CacheManager {
         Ok(dir)
     }
 
+    /// All image files currently present in the remote cache, recursively.
+    pub fn list_remote_images(&self) -> Result<Vec<PathBuf>> {
+        Ok(collect_files(&self.remote_dir)?
+            .into_iter()
+            .map(|file| file.path)
+            .filter(|path| is_supported_image(path))
+            .collect())
+    }
+
     pub fn cleanup(&self) -> Result<()> {
         let now = SystemTime::now();
         let stale_cutoff = now
@@ -108,4 +117,10 @@ fn collect_files(root: &Path) -> Result<Vec<CacheFile>> {
         });
     }
     Ok(out)
+}
+fn is_supported_image(path: &Path) -> bool {
+    matches!(
+        path.extension().and_then(|value| value.to_str()),
+        Some(ext) if matches!(ext.to_ascii_lowercase().as_str(), "jpg" | "jpeg" | "png" | "webp" | "bmp" | "gif")
+    )
 }
