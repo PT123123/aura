@@ -75,29 +75,12 @@ fn run_picker(
     let ui = crate::settings::WallpaperPickerWindow::new()
         .context("failed to create wallpaper picker window")?;
 
-    let mut entries = Vec::new();
-    for path in remote_images.into_iter().chain(local_images) {
-        if let Some(thumb) = make_thumbnail(&path) {
-            let name = path
-                .file_name()
-                .map(|value| value.to_string_lossy().into_owned())
-                .unwrap_or_default();
-            entries.push(crate::settings::WallpaperEntry {
-                path: SharedString::from(path.to_string_lossy().into_owned()),
-                thumb,
-                name: SharedString::from(name),
-            });
-        }
-    }
-    info!(count = entries.len(), "wallpaper picker listed images");
-    if entries.is_empty() {
-        return Err(anyhow::anyhow!(
-            "no wallpapers available yet; wait for the first remote download"
-        ));
-    }
-    let model: ModelRc<crate::settings::WallpaperEntry> =
-        std::rc::Rc::new(VecModel::from(entries)).into();
-    ui.set_entries(model);
+    // Show the window immediately with an empty list; thumbnails are
+    // generated on a worker thread and swapped in when ready so the UI
+    // never appears stuck for large caches.
+    let empty: ModelRc<crate::settings::WallpaperEntry> =
+        std::rc::Rc::new(VecModel::from(Vec::<crate::settings::WallpaperEntry>::new())).into();
+    ui.set_entries(empty);
 
     let tx = tray_event_tx.clone();
     let weak = ui.as_weak();
@@ -115,23 +98,68 @@ fn run_picker(
         }
     });
 
+    let paths = remote_images
+        .into_iter()
+        .chain(local_images)
+        .collect::<Vec<_>>();
+    let weak = ui.as_weak();
+    thread::spawn(move || {
+        let mut items = Vec::new();
+        for path in &paths {
+            if let Some((display_path, thumb_path)) = make_thumbnail(path) {
+                items.push((display_path, thumb_path));
+            }
+        }
+        info!(count = items.len(), "wallpaper picker prepared thumbnails");
+        let _ = slint::invoke_from_event_loop(move || {
+            if let Some(ui) = weak.upgrade() {
+                let mut entries = Vec::new();
+                for (display_path, thumb_path) in items {
+                    if let Some(thumb) = SlintImage::load_from_path(Path::new(&thumb_path)).ok() {
+                        let name = Path::new(&display_path)
+                            .file_name()
+                            .map(|value| value.to_string_lossy().into_owned())
+                            .unwrap_or_default();
+                        entries.push(crate::settings::WallpaperEntry {
+                            path: SharedString::from(display_path),
+                            thumb,
+                            name: SharedString::from(name),
+                        });
+                    }
+                }
+                let model: ModelRc<crate::settings::WallpaperEntry> =
+                    std::rc::Rc::new(VecModel::from(entries)).into();
+                ui.set_entries(model);
+                ui.set_loading(false);
+            }
+        });
+    });
+
     ui.run().context("wallpaper picker event loop failed")?;
     Ok(())
 }
 
-fn make_thumbnail(path: &Path) -> Option<SlintImage> {
-    let source = image::open(path).ok()?;
-    let (width, height) = image::GenericImageView::dimensions(&source);
-    let scale = THUMB_WIDTH as f32 / width as f32;
-    let target_height = (height as f32 * scale).max(1.0) as u32;
-    let thumbnail = source.thumbnail(THUMB_WIDTH, target_height);
-
+/// Create (or reuse) a thumbnail file; returns (display path, thumbnail path).
+fn make_thumbnail(path: &Path) -> Option<(String, String)> {
     let dir = std::env::temp_dir().join("aura-wallpaper-thumbs");
     std::fs::create_dir_all(&dir).ok()?;
     let key = blake3::hash(path.to_string_lossy().as_bytes()).to_hex().to_string();
     let output = dir.join(format!("{key}.png"));
-    thumbnail.save(&output).ok()?;
-    SlintImage::load_from_path(&output).ok()
+    if !output.exists() {
+        let source = image::open(path).ok()?;
+        let (width, height) = image::GenericImageView::dimensions(&source);
+        let scale = THUMB_WIDTH as f32 / width as f32;
+        let target_height = (height as f32 * scale).max(1.0) as u32;
+        let thumbnail = source.thumbnail(THUMB_WIDTH, target_height);
+        if let Err(error) = thumbnail.save(&output) {
+            warn!(error = %error, path = %path.display(), "failed to save wallpaper thumbnail");
+            return None;
+        }
+    }
+    Some((
+        path.to_string_lossy().into_owned(),
+        output.to_string_lossy().into_owned(),
+    ))
 }
 
 fn is_supported_image(path: &Path) -> bool {

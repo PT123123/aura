@@ -1,7 +1,7 @@
 import { Button, CheckBox, ComboBox, GroupBox, HorizontalBox, LineEdit, ListView, ScrollView, SpinBox, VerticalBox } from "std-widgets.slint";
 
 export component SettingsWindow inherits Window {
-    title: "Aura Settings";
+    title: "Aura 设置";
     width: 620px;
     height: 760px;
     background: #1e1e1e;
@@ -296,6 +296,7 @@ export component WallpaperPickerWindow inherits Window {
     background: #1e1e1e;
 
     in property <[WallpaperEntry]> entries: [];
+    in property <bool> loading: true;
     callback choose(string);
     callback request_close();
 
@@ -303,7 +304,7 @@ export component WallpaperPickerWindow inherits Window {
         padding: 12px;
         spacing: 10px;
         Text {
-            text: "点击「应用」把壁纸设置到所有屏幕";
+            text: root.loading ? "正在加载缩略图…" : "点击「应用」把壁纸设置到所有屏幕";
             color: #d0d0d0;
             font-size: 14px;
         }

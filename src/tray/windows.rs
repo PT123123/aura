@@ -1,5 +1,5 @@
 use crate::errors::Result;
-use crate::tray::{format_running_duration, SessionStats, TrayEvent};
+use crate::tray::{SessionStats, TrayEvent};
 use anyhow::{anyhow, bail};
 use std::mem::size_of;
 use std::path::{Path, PathBuf};
@@ -309,11 +309,11 @@ unsafe fn show_context_menu(hwnd: HWND, data: &mut WindowData) {
             return;
         }
 
-        let next_background_label = wide_null("Next Background");
-        let choose_wallpaper_label = wide_null("Choose Wallpaper");
-        let reload_settings_label = wide_null("Reload Settings");
-        let settings_label = wide_null("Settings");
-        let exit_label = wide_null("Exit");
+        let next_background_label = wide_null("设置下一个背景");
+        let choose_wallpaper_label = wide_null("选择壁纸");
+        let reload_settings_label = wide_null("重新加载设置");
+        let settings_label = wide_null("设置");
+        let exit_label = wide_null("退出");
         let next_background_icon = load_menu_icon_bitmap(
             data.hinstance,
             NEXT_BACKGROUND_ICON_RESOURCE_ID,
