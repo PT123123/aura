@@ -10,6 +10,8 @@ pub enum TrayEvent {
     OpenSettings,
     OpenWallpaperPicker,
     ApplyWallpaper(PathBuf),
+    ApplyWallpaperToMonitor(PathBuf, usize),
+    AddFavorite(PathBuf),
     CheckForUpdates,
     Exit,
 }

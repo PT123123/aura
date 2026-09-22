@@ -81,6 +81,7 @@ impl RotationManager {
             remaining_queue: self.remaining.iter().cloned().collect(),
             shown_ids: self.shown_current_cycle.iter().cloned().collect(),
             last_image_id: None,
+            favorites: Vec::new(),
         }
     }
 

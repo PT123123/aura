@@ -208,6 +208,7 @@ async fn run(args: Vec<String>, debug_requested: bool) -> Result<()> {
             PersistedState::default()
         }
     };
+    let mut favorites: Vec<String> = persisted_state.favorites.clone();
 
     let initial_candidates = refresh_all_sources(&mut sources).await?;
     let (mut local_images_count, mut remote_images_count) =
@@ -317,7 +318,7 @@ async fn run(args: Vec<String>, debug_requested: bool) -> Result<()> {
                 session_stats.inc_images_shown();
                 last_image_id = Some(next_id);
                 initial_image_applied = true;
-                persist_state(&state_store, &rotation, last_image_id.clone())?;
+                persist_state(&state_store, &rotation, &favorites, last_image_id.clone())?;
                 info!("prepared a persistent image fallback beneath the live shader");
             }
             None => {
@@ -367,7 +368,7 @@ async fn run(args: Vec<String>, debug_requested: bool) -> Result<()> {
         {
             session_stats.inc_images_shown();
             last_image_id = Some(next_id);
-            persist_state(&state_store, &rotation, last_image_id.clone())?;
+            persist_state(&state_store, &rotation, &favorites, last_image_id.clone())?;
         }
     }
 
@@ -392,7 +393,7 @@ async fn run(args: Vec<String>, debug_requested: bool) -> Result<()> {
             _ = tokio::signal::ctrl_c() => {
                 info!("ctrl-c received, stopping aura");
                 stop_renderer(&mut renderer, "ctrl-c shutdown").await;
-                persist_state(&state_store, &rotation, last_image_id.clone())?;
+                persist_state(&state_store, &rotation, &favorites, last_image_id.clone())?;
                 break;
             }
             _ = async {
@@ -443,6 +444,7 @@ async fn run(args: Vec<String>, debug_requested: bool) -> Result<()> {
                                 updater_restart_context.as_ref(),
                                 &state_store,
                                 &rotation,
+                                &favorites,
                                 last_image_id.clone(),
                                 &mut _single_instance_guard,
                             )
@@ -486,7 +488,7 @@ async fn run(args: Vec<String>, debug_requested: bool) -> Result<()> {
                                 Ok(Some(next_id)) => {
                                     session_stats.inc_images_shown();
                                     last_image_id = Some(next_id);
-                                    if let Err(error) = persist_state(&state_store, &rotation, last_image_id.clone()) {
+                                    if let Err(error) = persist_state(&state_store, &rotation, &favorites, last_image_id.clone()) {
                                         warn!(error = %error, "failed to persist state after shader fallback");
                                     }
                                 }
@@ -533,7 +535,7 @@ async fn run(args: Vec<String>, debug_requested: bool) -> Result<()> {
                                 session_stats.inc_images_shown();
                                 session_stats.inc_manual_skips();
                                 last_image_id = Some(next_id);
-                                if let Err(error) = persist_state(&state_store, &rotation, last_image_id.clone()) {
+                                if let Err(error) = persist_state(&state_store, &rotation, &favorites, last_image_id.clone()) {
                                     warn!(error = %error, "failed to persist state after tray wallpaper switch");
                                 }
                             }
@@ -545,6 +547,7 @@ async fn run(args: Vec<String>, debug_requested: bool) -> Result<()> {
                                 updater_restart_context.as_ref(),
                                 &state_store,
                                 &rotation,
+                                &favorites,
                                 last_image_id.clone(),
                                 &mut _single_instance_guard,
                             )
@@ -764,6 +767,7 @@ async fn run(args: Vec<String>, debug_requested: bool) -> Result<()> {
                                 updater_restart_context.as_ref(),
                                 &state_store,
                                 &rotation,
+                                &favorites,
                                 last_image_id.clone(),
                                 &mut _single_instance_guard,
                             )
@@ -773,7 +777,7 @@ async fn run(args: Vec<String>, debug_requested: bool) -> Result<()> {
                         }
 
                         if let Err(error) =
-                            persist_state(&state_store, &rotation, last_image_id.clone())
+                            persist_state(&state_store, &rotation, &favorites, last_image_id.clone())
                         {
                             warn!(error = %error, "failed to persist state after settings reload");
                         }
@@ -806,9 +810,18 @@ async fn run(args: Vec<String>, debug_requested: bool) -> Result<()> {
                             };
                             let local_images =
                                 wallpaper_picker::collect_local_images(&config.image.sources);
+                            let monitor_names = match backend.monitor_names() {
+                                Ok(names) => names,
+                                Err(error) => {
+                                    warn!(error = %error, "failed to enumerate monitors");
+                                    Vec::new()
+                                }
+                            };
                             crate::wallpaper_picker::open_wallpaper_picker(
                                 remote_images,
                                 local_images,
+                                monitor_names,
+                                favorites.clone(),
                                 tray_event_tx.clone(),
                             );
                         }
@@ -830,7 +843,7 @@ async fn run(args: Vec<String>, debug_requested: bool) -> Result<()> {
                                 session_stats.inc_images_shown();
                                 last_image_id = Some(path.to_string_lossy().into_owned());
                                 if let Err(error) =
-                                    persist_state(&state_store, &rotation, last_image_id.clone())
+                                    persist_state(&state_store, &rotation, &favorites, last_image_id.clone())
                                 {
                                     warn!(error = %error, "failed to persist state after picked wallpaper");
                                 }
@@ -842,16 +855,63 @@ async fn run(args: Vec<String>, debug_requested: bool) -> Result<()> {
                             ),
                         }
                     }
+                    Some(TrayEvent::ApplyWallpaperToMonitor(path, monitor_index)) => {
+                        if active_mode != ActiveMode::Image {
+                            warn!("picked wallpaper ignored while shader mode is active");
+                            continue;
+                        }
+                        if !path.is_file() {
+                            warn!(path = %path.display(), "picked wallpaper no longer exists");
+                            continue;
+                        }
+                        match backend.set_wallpaper_for_monitor(path.as_path(), monitor_index) {
+                            Ok(()) => {
+                                info!(
+                                    path = %path.display(),
+                                    monitor = monitor_index,
+                                    "picked wallpaper applied to display"
+                                );
+                                last_image_id = Some(path.to_string_lossy().into_owned());
+                                if let Err(error) =
+                                    persist_state(&state_store, &rotation, &favorites, last_image_id.clone())
+                                {
+                                    warn!(error = %error, "failed to persist state after per-monitor wallpaper");
+                                }
+                            }
+                            Err(error) => warn!(
+                                error = %error,
+                                path = %path.display(),
+                                monitor = monitor_index,
+                                "failed to apply picked wallpaper to display"
+                            ),
+                        }
+                    }
+                    Some(TrayEvent::AddFavorite(path)) => {
+                        let key = path.to_string_lossy().into_owned();
+                        let toggled_on = if favorites.contains(&key) {
+                            favorites.retain(|existing| existing != &key);
+                            false
+                        } else {
+                            favorites.push(key);
+                            true
+                        };
+                        if let Err(error) =
+                            persist_state(&state_store, &rotation, &favorites, last_image_id.clone())
+                        {
+                            warn!(error = %error, "failed to persist favorites");
+                        }
+                        info!(count = favorites.len(), toggled_on, "wallpaper favorite toggled");
+                    }
                     Some(TrayEvent::Exit) => {
                         info!("tray requested exit, stopping aura");
                         stop_renderer(&mut renderer, "tray exit").await;
-                        persist_state(&state_store, &rotation, last_image_id.clone())?;
+                        persist_state(&state_store, &rotation, &favorites, last_image_id.clone())?;
                         break;
                     }
                     None => {
                         info!("tray event channel closed, stopping aura");
                         stop_renderer(&mut renderer, "tray event channel closed").await;
-                        persist_state(&state_store, &rotation, last_image_id.clone())?;
+                        persist_state(&state_store, &rotation, &favorites, last_image_id.clone())?;
                         break;
                     }
                 }
@@ -879,7 +939,7 @@ async fn run(args: Vec<String>, debug_requested: bool) -> Result<()> {
                             Ok(Some(next_id)) => {
                                 session_stats.inc_images_shown();
                                 last_image_id = Some(next_id);
-                                if let Err(error) = persist_state(&state_store, &rotation, last_image_id.clone()) {
+                                if let Err(error) = persist_state(&state_store, &rotation, &favorites, last_image_id.clone()) {
                                     warn!(error = %error, "failed to persist state after wallpaper switch");
                                 }
                             }
@@ -895,6 +955,7 @@ async fn run(args: Vec<String>, debug_requested: bool) -> Result<()> {
                                 updater_restart_context.as_ref(),
                                 &state_store,
                                 &rotation,
+                                &favorites,
                                 last_image_id.clone(),
                                 &mut _single_instance_guard,
                             )
@@ -1028,6 +1089,7 @@ fn restart_after_update(
     restart_context: Option<&RestartContext>,
     state_store: &StateStore,
     rotation: &RotationManager,
+    favorites: &[String],
     last_image_id: Option<String>,
     single_instance_guard: &mut Option<tray::SingleInstanceGuard>,
 ) -> bool {
@@ -1035,7 +1097,7 @@ fn restart_after_update(
         warn!("unable to restart after update: restart context is unavailable");
         return false;
     };
-    if let Err(error) = persist_state(state_store, rotation, last_image_id) {
+    if let Err(error) = persist_state(state_store, rotation, &favorites, last_image_id) {
         warn!(error = %error, "failed to persist state before update restart");
         return false;
     }
@@ -1314,9 +1376,11 @@ fn merge_with_existing_remote_candidates(
 fn persist_state(
     state_store: &StateStore,
     rotation: &RotationManager,
+    favorites: &[String],
     last_image_id: Option<String>,
 ) -> Result<()> {
     let mut persisted = rotation.export_state();
+    persisted.favorites = favorites.to_vec();
     persisted.last_image_id = last_image_id;
     state_store.save(&persisted)?;
     Ok(())
@@ -1672,6 +1736,7 @@ mod tests {
             remaining_queue: vec!["current".to_string(), "next".to_string()],
             shown_ids: Vec::new(),
             last_image_id: None,
+            favorites: Vec::new(),
         });
 
         let backend = RecordingBackend::default();
@@ -1731,6 +1796,7 @@ mod tests {
             ],
             shown_ids: Vec::new(),
             last_image_id: None,
+            favorites: Vec::new(),
         });
 
         let backend = RecordingBackend::default();
@@ -1772,6 +1838,7 @@ mod tests {
             ],
             shown_ids: Vec::new(),
             last_image_id: None,
+            favorites: Vec::new(),
         });
 
         let backend = RecordingBackend::with_monitors(3);

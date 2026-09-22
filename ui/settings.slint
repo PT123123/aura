@@ -1,4 +1,4 @@
-import { Button, CheckBox, ComboBox, GroupBox, HorizontalBox, LineEdit, ListView, ScrollView, SpinBox, VerticalBox } from "std-widgets.slint";
+import { Button, CheckBox, ComboBox, GroupBox, HorizontalBox, LineEdit, ScrollView, SpinBox, VerticalBox } from "std-widgets.slint";
 
 export component SettingsWindow inherits Window {
     title: "Aura 设置";
@@ -287,61 +287,164 @@ struct WallpaperEntry {
     path: string,
     thumb: image,
     name: string,
+    favorited: bool,
+}
+
+struct WallpaperCell {
+    path: string,
+    thumb: image,
+    name: string,
+    favorited: bool,
+    row: int,
+    col: int,
 }
 
 export component WallpaperPickerWindow inherits Window {
     title: "选择壁纸";
-    width: 720px;
-    height: 560px;
+    width: 760px;
+    height: 620px;
     background: #1e1e1e;
 
-    in property <[WallpaperEntry]> entries: [];
+    in property <[WallpaperCell]> cells: [];
+    in property <[string]> monitor-names: [];
     in property <bool> loading: true;
-    callback choose(string);
-    callback request_close();
+    in-out property <string> menu-path: "";
+    in-out property <bool> menu-favorited: false;
+    in-out property <bool> menu-visible: false;
+    in-out property <length> menu-x: 0px;
+    in-out property <length> menu-y: 0px;
+    callback apply-all(string);
+    callback apply-to-monitor(string, int);
+    callback add-favorite(string);
+    callback close-window();
 
     VerticalBox {
         padding: 12px;
         spacing: 10px;
         Text {
-            text: root.loading ? "正在加载缩略图…" : "点击「应用」把壁纸设置到所有屏幕";
+            text: root.loading ? "正在加载缩略图…" : "右键壁纸可在菜单中「应用到某个屏幕」或「加入收藏」";
             color: #d0d0d0;
             font-size: 14px;
         }
         ScrollView {
-            ListView {
-                for entry in root.entries: HorizontalBox {
-                    padding: 4px;
-                    spacing: 10px;
-                    Image {
-                        source: entry.thumb;
-                        width: 200px;
-                        height: 112px;
-                        image-fit: cover;
-                    }
-                    VerticalBox {
-                        Text {
-                            text: entry.name;
-                            color: #c8c8c8;
-                            font-size: 12px;
-                            vertical-alignment: center;
-                            horizontal-alignment: left;
+            GridLayout {
+                spacing: 10px;
+                for cell in root.cells:
+                    Rectangle {
+                        row: cell.row;
+                        col: cell.col;
+                        background: #262626;
+                        border-radius: 6px;
+                        border-width: 1px;
+                        border-color: cell.favorited ? #d4a017 : #3a3a3a;
+                        VerticalBox {
+                            spacing: 4px;
+                            padding: 6px;
+                            TouchArea {
+                                mouse-cursor: pointer;
+                                pointer-event(event) => {
+                                    if (event.kind == PointerEventKind.down && event.button == PointerEventButton.right) {
+                                        root.menu-path = cell.path;
+                                        root.menu-favorited = cell.favorited;
+                                        root.menu-x = max(0px, min(540px, self.mouse-x - 70px));
+                                        root.menu-y = max(0px, min(420px, self.mouse-y - 12px));
+                                        root.menu-visible = true;
+                                    }
+                                }
+                                VerticalBox {
+                                    spacing: 4px;
+                                    Image {
+                                        source: cell.thumb;
+                                        height: 112px;
+                                        image-fit: cover;
+                                    }
+                                    HorizontalBox {
+                                        spacing: 4px;
+                                        Text {
+                                            text: cell.favorited ? "★" : "";
+                                            color: #d4a017;
+                                            vertical-alignment: center;
+                                        }
+                                        Text {
+                                            text: cell.name;
+                                            color: #c8c8c8;
+                                            font-size: 11px;
+                                            overflow: elide;
+                                            vertical-alignment: center;
+                                            horizontal-alignment: left;
+                                        }
+                                    }
+                                }
+                            }
+                            Button {
+                                text: "应用全部";
+                                height: 26px;
+                                clicked => { root.apply-all(cell.path); }
+                            }
                         }
                     }
-                    Button {
-                        text: "应用";
-                        clicked => { root.choose(entry.path); }
-                    }
-                }
             }
         }
         HorizontalBox {
             alignment: end;
             Button {
                 text: "关闭";
-                clicked => { root.request_close(); }
+                clicked => { root.close-window(); }
+            }
+        }
+    }
+
+    // Click-catcher behind the context menu: dismisses it.
+    Rectangle {
+        visible: root.menu-visible;
+        x: 0px;
+        y: 0px;
+        width: 100%;
+        height: 100%;
+        TouchArea {
+            width: 100%;
+            height: 100%;
+            clicked => { root.menu-visible = false; }
+        }
+    }
+
+    // Context menu for a wallpaper (apply-to-monitor / favorite).
+    Rectangle {
+        x: root.menu-x;
+        y: root.menu-y;
+        width: 200px;
+        visible: root.menu-visible;
+        background: #2b2b2b;
+        border-radius: 6px;
+        border-width: 1px;
+        border-color: #3f3f3f;
+        VerticalBox {
+            padding: 4px;
+            spacing: 2px;
+            for name[idx] in root.monitor-names: Button {
+                text: "应用到 " + name;
+                height: 28px;
+                clicked => {
+                    root.menu-visible = false;
+                    root.apply-to-monitor(root.menu-path, idx);
+                }
+            }
+            Button {
+                text: "应用到所有屏幕";
+                height: 28px;
+                clicked => {
+                    root.menu-visible = false;
+                    root.apply-all(root.menu-path);
+                }
+            }
+            Button {
+                text: root.menu-favorited ? "取消收藏" : "加入收藏";
+                height: 28px;
+                clicked => {
+                    root.menu-visible = false;
+                    root.add-favorite(root.menu-path);
+                }
             }
         }
     }
 }
-

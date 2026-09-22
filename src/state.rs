@@ -9,6 +9,8 @@ pub struct PersistedState {
     pub remaining_queue: Vec<String>,
     pub shown_ids: Vec<String>,
     pub last_image_id: Option<String>,
+    #[serde(default)]
+    pub favorites: Vec<String>,
 }
 
 #[derive(Debug, Clone)]

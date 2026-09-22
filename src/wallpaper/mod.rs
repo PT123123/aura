@@ -31,6 +31,22 @@ pub trait WallpaperBackend: Send + Sync {
         };
         self.set_wallpaper(first)
     }
+
+    /// Human-readable names for the managed displays (e.g. "显示器 1").
+    fn monitor_names(&self) -> Result<Vec<String>> {
+        let count = self.monitor_count()?;
+        Ok((0..count).map(|index| format!("显示器 {}", index + 1)).collect())
+    }
+
+    /// Apply a wallpaper to a single display by index. The default backend
+    /// cannot address individual displays and falls back to the shared path.
+    fn set_wallpaper_for_monitor(&self, path: &Path, monitor_index: usize) -> Result<()> {
+        let count = self.monitor_count()?;
+        if monitor_index >= count {
+            anyhow::bail!("monitor index {monitor_index} out of range ({count} displays)");
+        }
+        self.set_wallpaper(path)
+    }
 }
 
 #[cfg(windows)]

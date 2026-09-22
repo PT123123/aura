@@ -167,6 +167,42 @@ impl WallpaperBackend for WindowsWallpaperBackend {
         Ok(self.real_monitor_ids()?.len())
     }
 
+    fn monitor_names(&self) -> Result<Vec<String>> {
+        let monitors = self.real_monitor_ids()?;
+        Ok(monitors
+            .iter()
+            .enumerate()
+            .map(|(index, _)| format!("显示器 {}", index + 1))
+            .collect())
+    }
+
+    fn set_wallpaper_for_monitor(&self, path: &Path, monitor_index: usize) -> Result<()> {
+        enforce_fill_style().context("failed to enforce wallpaper Fill style")?;
+
+        let monitors = self.real_monitor_ids()?;
+        let Some(monitor) = monitors.get(monitor_index) else {
+            bail!("monitor index {monitor_index} out of range ({} displays)", monitors.len());
+        };
+
+        let absolute = path
+            .canonicalize()
+            .with_context(|| format!("failed to canonicalize {}", path.display()))?;
+        let wide: Vec<u16> = absolute
+            .as_os_str()
+            .encode_wide()
+            .chain(iter::once(0))
+            .collect();
+
+        let desktop = self.desktop_wallpaper()?;
+        let vtbl = Self::vtbl(desktop);
+        let hr = unsafe { (vtbl.set_wallpaper)(desktop, monitor.as_ptr(), wide.as_ptr()) };
+        unsafe { (vtbl.release)(desktop) };
+        if hr < 0 {
+            bail!("IDesktopWallpaper::SetWallpaper failed with 0x{hr:08X}");
+        }
+        Ok(())
+    }
+
     fn set_wallpapers(&self, wallpapers: &[&Path]) -> Result<()> {
         enforce_fill_style().context("failed to enforce wallpaper Fill style")?;
 
