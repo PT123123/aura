@@ -10,6 +10,27 @@ mod windows;
 
 pub trait WallpaperBackend: Send + Sync {
     fn set_wallpaper(&self, path: &Path) -> Result<()>;
+
+    /// Number of displays the backend currently manages.
+    ///
+    /// Backends that cannot query the display topology default to `1`.
+    fn monitor_count(&self) -> Result<usize> {
+        Ok(1)
+    }
+
+    /// Apply a distinct wallpaper to every display.
+    ///
+    /// `wallpapers[i]` is applied to display `i` (wrapping around when there
+    /// are fewer wallpapers than displays). The default implementation only
+    /// supports a single shared wallpaper and applies `wallpapers[0]` to the
+    /// whole desktop; backends that can address displays individually (e.g.
+    /// Windows via `IDesktopWallpaper`) override this.
+    fn set_wallpapers(&self, wallpapers: &[&Path]) -> Result<()> {
+        let Some(first) = wallpapers.first() else {
+            anyhow::bail!("no wallpapers provided")
+        };
+        self.set_wallpaper(first)
+    }
 }
 
 #[cfg(windows)]

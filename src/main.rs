@@ -1126,10 +1126,26 @@ async fn try_switch_once(
         return Ok(None);
     }
 
-    for _ in 0..rotation.pool_size() {
+    // Query the display topology so each display can receive its own image.
+    let display_count = match backend.monitor_count() {
+        Ok(count) if count > 0 => count,
+        Ok(_) => 1,
+        Err(error) => {
+            warn!(error = %error, "failed to query monitor count, assuming a single display");
+            1
+        }
+    };
+
+    let mut applied: Vec<PathBuf> = Vec::with_capacity(display_count);
+    let mut first_id: Option<String> = None;
+    let mut attempts = 0;
+    let max_attempts = rotation.pool_size();
+
+    while applied.len() < display_count && attempts < max_attempts {
+        attempts += 1;
         let candidate = match rotation.next() {
             Some(candidate) => candidate,
-            None => return Ok(None),
+            None => break,
         };
         let source_input = candidate.display_source();
 
@@ -1165,24 +1181,30 @@ async fn try_switch_once(
         )
         .with_context(|| format!("failed to process {}", resolved.display()))?;
 
-        backend
-            .set_wallpaper(&processed)
-            .with_context(|| format!("failed to set wallpaper {}", processed.display()))?;
-
-        prefetch_next_candidate(rotation);
-
-        info!(
-            id = %candidate.id,
-            source = %origin_name(candidate.origin),
-            input = %source_input,
-            resolved = %resolved.display(),
-            output = %processed.display(),
-            "wallpaper updated"
-        );
-        return Ok(Some(candidate.id));
+        if first_id.is_none() {
+            first_id = Some(candidate.id.clone());
+        }
+        applied.push(processed);
     }
 
-    Ok(None)
+    if applied.is_empty() {
+        return Ok(None);
+    }
+
+    let refs: Vec<&Path> = applied.iter().map(PathBuf::as_path).collect();
+    backend
+        .set_wallpapers(&refs)
+        .with_context(|| format!("failed to set wallpapers across {} display(s)", refs.len()))?;
+
+    prefetch_next_candidate(rotation);
+
+    info!(
+        id = %first_id.as_deref().unwrap_or(""),
+        displays = refs.len(),
+        "wallpaper updated across displays"
+    );
+
+    Ok(first_id)
 }
 
 fn prefetch_next_candidate(rotation: &mut RotationManager) {
@@ -1203,14 +1225,6 @@ fn prefetch_next_candidate(rotation: &mut RotationManager) {
             );
         }
     });
-}
-
-fn origin_name(origin: Origin) -> &'static str {
-    match origin {
-        Origin::File => "file",
-        Origin::Directory => "directory",
-        Origin::Rss => "rss",
-    }
 }
 
 fn count_images_by_origin(candidates: &[ImageCandidate]) -> (u64, u64) {
@@ -1612,7 +1626,8 @@ mod tests {
             .unwrap();
 
         assert_eq!(selected, Some("current".to_string()));
-        assert_eq!(backend.calls(), 1);
+        assert_eq!(backend.calls(), 0, "the per-monitor path is always used");
+        assert_eq!(backend.batches().len(), 1);
         assert_eq!(server.hits("/current.png"), 1);
 
         for _ in 0..20 {
@@ -1670,19 +1685,78 @@ mod tests {
             .unwrap();
 
         assert_eq!(selected, Some("good".to_string()));
-        assert_eq!(backend.calls(), 1);
+        assert_eq!(backend.calls(), 0, "the per-monitor path is always used");
+        assert_eq!(backend.batches().len(), 1);
         assert_eq!(server.hits("/missing.png"), 1);
         assert_eq!(server.hits("/good.png"), 1);
+    }
+
+    #[tokio::test]
+    async fn try_switch_once_applies_distinct_wallpapers_per_monitor() {
+        let tmp = tempdir().unwrap();
+        let config = test_config(tmp.path());
+        let cache = CacheManager::new(&config).unwrap();
+
+        let img_a = tmp.path().join("a.png");
+        let img_b = tmp.path().join("b.png");
+        let img_c = tmp.path().join("c.png");
+        for path in [&img_a, &img_b, &img_c] {
+            fs::write(path, tiny_png_bytes()).unwrap();
+        }
+
+        let mut rotation = RotationManager::new();
+        rotation.rebuild_pool(vec![
+            ImageCandidate::local("a".to_string(), Origin::Directory, img_a, None),
+            ImageCandidate::local("b".to_string(), Origin::Directory, img_b, None),
+            ImageCandidate::local("c".to_string(), Origin::Directory, img_c, None),
+        ]);
+        rotation.restore_state(&PersistedState {
+            remaining_queue: vec![
+                "a".to_string(),
+                "b".to_string(),
+                "c".to_string(),
+            ],
+            shown_ids: Vec::new(),
+            last_image_id: None,
+        });
+
+        let backend = RecordingBackend::with_monitors(3);
+        let selected = try_switch_once(&mut rotation, &cache, &backend, &config)
+            .await
+            .unwrap();
+
+        assert_eq!(selected, Some("a".to_string()));
+        assert_eq!(
+            backend.calls(),
+            0,
+            "per-monitor mode must not use the legacy single-wallpaper path"
+        );
+        let batches = backend.batches();
+        assert_eq!(batches.len(), 1, "one set_wallpapers call expected");
+        assert_eq!(batches[0].len(), 3, "one wallpaper per monitor expected");
+        assert!(batches[0].iter().all(|p| p.exists()));
     }
 
     #[derive(Default)]
     struct RecordingBackend {
         calls: Mutex<Vec<PathBuf>>,
+        batches: Mutex<Vec<Vec<PathBuf>>>,
+        monitors: Mutex<Option<usize>>,
     }
 
     impl RecordingBackend {
         fn calls(&self) -> usize {
             self.calls.lock().unwrap().len()
+        }
+
+        fn with_monitors(monitors: usize) -> Self {
+            let backend = Self::default();
+            *backend.monitors.lock().unwrap() = Some(monitors);
+            backend
+        }
+
+        fn batches(&self) -> Vec<Vec<PathBuf>> {
+            self.batches.lock().unwrap().clone()
         }
     }
 
@@ -1690,6 +1764,21 @@ mod tests {
         fn set_wallpaper(&self, path: &Path) -> Result<()> {
             assert!(path.exists());
             self.calls.lock().unwrap().push(path.to_path_buf());
+            Ok(())
+        }
+
+        fn monitor_count(&self) -> Result<usize> {
+            Ok(self.monitors.lock().unwrap().unwrap_or(1))
+        }
+
+        fn set_wallpapers(&self, wallpapers: &[&Path]) -> Result<()> {
+            for path in wallpapers {
+                assert!(path.exists());
+            }
+            self.batches
+                .lock()
+                .unwrap()
+                .push(wallpapers.iter().map(|p| p.to_path_buf()).collect());
             Ok(())
         }
     }
