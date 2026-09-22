@@ -18,6 +18,8 @@ mod macos_support;
 mod renderer;
 mod rotation;
 mod scheduler;
+#[cfg(windows)]
+mod settings;
 mod sources;
 mod state;
 mod tray;
@@ -784,6 +786,9 @@ async fn run(args: Vec<String>, debug_requested: bool) -> Result<()> {
                         );
                     }
                     Some(TrayEvent::OpenSettings) => {
+                        #[cfg(windows)]
+                        crate::settings::open_settings_window(config_path.clone(), tray_event_tx.clone());
+                        #[cfg(not(windows))]
                         if let Err(error) = tray::open_settings(&config_path) {
                             warn!(error = %error, path = %config_path.display(), "failed to open settings");
                         }

@@ -48,6 +48,7 @@ url = "2.5"
 walkdir = "2.5"
 wgpu = { version = "30.0", features = ["spirv"] }
 winit = "0.30"
+slint = "1.18.1"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [
@@ -94,6 +95,9 @@ image = { version = "0.25", default-features = false, features = [
     "bmp",
 ] }
 naga = { version = "30.0", features = ["glsl-in", "spv-out", "wgsl-in"] }
+
+[target.'cfg(windows)'.build-dependencies]
+slint-build = "1"
 
 [profile.dev]
 opt-level = 0

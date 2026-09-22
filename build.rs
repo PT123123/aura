@@ -98,6 +98,7 @@ fn main() {
     let target = std::env::var("TARGET").unwrap_or_default();
     compile_precompiled_shaders(&manifest_dir, &out_dir, &target);
     if target.contains("windows") {
+        slint_build::compile("ui/settings.slint").expect("failed to compile settings UI");
         generate_windows_resources(&manifest_dir, &out_dir);
     }
 }

@@ -1,0 +1,199 @@
+import { Button, CheckBox, ComboBox, GroupBox, HorizontalBox, LineEdit, ScrollView, SpinBox, VerticalBox } from "std-widgets.slint";
+
+export component SettingsWindow inherits Window {
+    title: "Aura Settings";
+    width: 620px;
+    height: 760px;
+    background: #f5f6f8;
+
+    // ---- editable properties, synced from Rust ----
+    in-out property <int> renderer-index: 0;
+    in-out property <int> image-timer-secs: 300;
+    in-out property <int> remote-update-secs: 3600;
+    in-out property <int> format-index: 0;
+    in-out property <int> jpeg-quality: 90;
+    in-out property <string> sources-summary: "";
+    in-out property <bool> updater-enabled: true;
+    in-out property <int> updater-interval-secs: 21600;
+    in-out property <string> feed-url: "";
+    in-out property <string> shader-name: "";
+    in-out property <int> shader-fps: 60;
+    in-out property <int> shader-resolution: 100;
+    in-out property <bool> shader-mouse-enabled: false;
+    in-out property <int> shader-scope-index: 0;
+    in-out property <int> shader-color-space-index: 0;
+    in-out property <int> log-level-index: 2;
+    in-out property <string> cache-dir: "";
+    in-out property <string> state-file: "";
+    in-out property <string> status-text: "";
+
+    callback save();
+    callback reload-settings();
+    callback open-config-file();
+
+    VerticalBox {
+        padding: 16px;
+        spacing: 12px;
+
+        ScrollView {
+            VerticalBox {
+                spacing: 12px;
+
+                GroupBox {
+                    title: "渲染 Renderer";
+                    VerticalBox {
+                        HorizontalBox {
+                            spacing: 8px;
+                            Text { text: "模式"; vertical-alignment: center; }
+                            ComboBox {
+                                model: ["图片 Image", "着色器 Shader"];
+                                current-index: root.renderer-index;
+                                selected => { root.renderer-index = self.current-index; }
+                            }
+                        }
+                    }
+                }
+
+                GroupBox {
+                    title: "图片 Image";
+                    VerticalBox {
+                        spacing: 8px;
+                        HorizontalBox {
+                            spacing: 8px;
+                            Text { text: "轮换间隔 (秒)"; vertical-alignment: center; }
+                            SpinBox { minimum: 5; maximum: 86400; value: root.image-timer-secs; edited => { root.image-timer-secs = round(self.value); } }
+                        }
+                        HorizontalBox {
+                            spacing: 8px;
+                            Text { text: "远程更新间隔 (秒)"; vertical-alignment: center; }
+                            SpinBox { minimum: 60; maximum: 86400; value: root.remote-update-secs; edited => { root.remote-update-secs = round(self.value); } }
+                        }
+                        HorizontalBox {
+                            spacing: 8px;
+                            Text { text: "输出格式"; vertical-alignment: center; }
+                            ComboBox {
+                                model: ["png", "jpg"];
+                                current-index: root.format-index;
+                                selected => { root.format-index = self.current-index; }
+                            }
+                        }
+                        HorizontalBox {
+                            spacing: 8px;
+                            Text { text: "JPEG 质量"; vertical-alignment: center; }
+                            SpinBox { minimum: 1; maximum: 100; value: root.jpeg-quality; edited => { root.jpeg-quality = round(self.value); } }
+                        }
+                        GroupBox {
+                            title: "图片来源 Sources";
+                            Text {
+                                text: root.sources-summary;
+                                wrap: word-wrap;
+                            }
+                        }
+                    }
+                }
+
+                GroupBox {
+                    title: "着色器 Shader";
+                    VerticalBox {
+                        spacing: 8px;
+                        HorizontalBox {
+                            spacing: 8px;
+                            Text { text: "名称"; vertical-alignment: center; }
+                            LineEdit { text: root.shader-name; edited => { root.shader-name = self.text; } }
+                        }
+                        HorizontalBox {
+                            spacing: 8px;
+                            Text { text: "目标帧率"; vertical-alignment: center; }
+                            SpinBox { minimum: 1; maximum: 240; value: root.shader-fps; edited => { root.shader-fps = round(self.value); } }
+                        }
+                        HorizontalBox {
+                            spacing: 8px;
+                            Text { text: "分辨率 (%)"; vertical-alignment: center; }
+                            SpinBox { minimum: 10; maximum: 100; value: root.shader-resolution; edited => { root.shader-resolution = round(self.value); } }
+                        }
+                        CheckBox {
+                            text: "启用鼠标交互";
+                            checked: root.shader-mouse-enabled;
+                            toggled => { root.shader-mouse-enabled = self.checked; }
+                        }
+                        HorizontalBox {
+                            spacing: 8px;
+                            Text { text: "桌面范围"; vertical-alignment: center; }
+                            ComboBox {
+                                model: ["virtual", "primary"];
+                                current-index: root.shader-scope-index;
+                                selected => { root.shader-scope-index = self.current-index; }
+                            }
+                        }
+                        HorizontalBox {
+                            spacing: 8px;
+                            Text { text: "色彩空间"; vertical-alignment: center; }
+                            ComboBox {
+                                model: ["unorm", "srgb"];
+                                current-index: root.shader-color-space-index;
+                                selected => { root.shader-color-space-index = self.current-index; }
+                            }
+                        }
+                    }
+                }
+
+                GroupBox {
+                    title: "更新 Updater";
+                    VerticalBox {
+                        spacing: 8px;
+                        CheckBox {
+                            text: "启用自动更新";
+                            checked: root.updater-enabled;
+                            toggled => { root.updater-enabled = self.checked; }
+                        }
+                        HorizontalBox {
+                            spacing: 8px;
+                            Text { text: "检查间隔 (秒)"; vertical-alignment: center; }
+                            SpinBox { minimum: 60; maximum: 604800; value: root.updater-interval-secs; edited => { root.updater-interval-secs = round(self.value); } }
+                        }
+                        HorizontalBox {
+                            spacing: 8px;
+                            Text { text: "更新源 URL"; vertical-alignment: center; }
+                            LineEdit { text: root.feed-url; edited => { root.feed-url = self.text; } }
+                        }
+                    }
+                }
+
+                GroupBox {
+                    title: "通用 General";
+                    VerticalBox {
+                        spacing: 8px;
+                        HorizontalBox {
+                            spacing: 8px;
+                            Text { text: "日志级别"; vertical-alignment: center; }
+                            ComboBox {
+                                model: ["error", "warn", "info", "debug", "trace"];
+                                current-index: root.log-level-index;
+                                selected => { root.log-level-index = self.current-index; }
+                            }
+                        }
+                        HorizontalBox {
+                            spacing: 8px;
+                            Text { text: "缓存目录"; vertical-alignment: center; }
+                            LineEdit { text: root.cache-dir; enabled: false; }
+                        }
+                        HorizontalBox {
+                            spacing: 8px;
+                            Text { text: "状态文件"; vertical-alignment: center; }
+                            LineEdit { text: root.state-file; enabled: false; }
+                        }
+                    }
+                }
+            }
+        }
+
+        HorizontalBox {
+            spacing: 8px;
+            Button { text: "保存并重载"; primary: true; clicked => { root.save(); } }
+            Button { text: "重新载入"; clicked => { root.reload-settings(); } }
+            Button { text: "打开配置文件"; clicked => { root.open-config-file(); } }
+        }
+
+        Text { text: root.status-text; color: #555555; wrap: word-wrap; }
+    }
+}
