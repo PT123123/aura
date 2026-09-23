@@ -92,6 +92,13 @@ impl ImageCandidate {
 
     #[cfg(test)]
     pub fn cached_local_path(&self) -> Result<Option<PathBuf>> {
+        self.local_path()
+    }
+
+    /// Synchronous local path of the candidate (cached file for RSS, the file
+    /// itself for local sources). Used to match a deleted file back to the
+    /// rotation pool entry.
+    pub fn local_path(&self) -> Result<Option<PathBuf>> {
         match &self.location {
             ImageLocation::Local(path) => Ok(Some(path.clone())),
             ImageLocation::Rss {

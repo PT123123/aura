@@ -256,8 +256,18 @@ async fn run(args: Vec<String>, debug_requested: bool) -> Result<()> {
         _single_instance_guard = match tray::try_acquire_single_instance()? {
             Some(guard) => Some(guard),
             None => {
-                info!("another tray-enabled aura instance is already running, exiting");
-                return Ok(());
+                info!("another tray-enabled aura instance is already running; requesting graceful exit so the new build can replace it");
+                tray::request_existing_instance_exit_and_wait()?;
+                match tray::try_acquire_single_instance()? {
+                    Some(guard) => {
+                        info!("old instance released the lock; continuing with this instance");
+                        Some(guard)
+                    }
+                    None => {
+                        warn!("could not acquire the single-instance lock after replacement; exiting");
+                        return Ok(());
+                    }
+                }
             }
         };
 
@@ -909,6 +919,37 @@ async fn run(args: Vec<String>, debug_requested: bool) -> Result<()> {
                             warn!(error = %error, "failed to persist favorites");
                         }
                         info!(count = favorites.len(), toggled_on, "wallpaper favorite toggled");
+                    }
+                    Some(TrayEvent::RemoveWallpaper(path)) => {
+                        let removed_from_pool = rotation.remove_by_path(&path);
+                        let path_key = path.to_string_lossy().to_string();
+                        favorites.retain(|entry| entry != &path_key);
+
+                        let mut deleted_file = false;
+                        if path.exists() {
+                            match std::fs::remove_file(&path) {
+                                Ok(()) => deleted_file = true,
+                                Err(error) => warn!(
+                                    error = %error,
+                                    path = %path.display(),
+                                    "failed to delete wallpaper file"
+                                ),
+                            }
+                        }
+                        if let Err(error) = persist_state(
+                            &state_store,
+                            &rotation,
+                            &favorites,
+                            last_image_id.clone(),
+                        ) {
+                            warn!(error = %error, "failed to persist state after wallpaper removal");
+                        }
+                        info!(
+                            path = %path.display(),
+                            removed_from_pool,
+                            deleted_file,
+                            "wallpaper removed from picker"
+                        );
                     }
                     Some(TrayEvent::Exit) => {
                         info!("tray requested exit, stopping aura");

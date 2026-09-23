@@ -2,13 +2,14 @@ use crate::config::TrayDoubleClickAction;
 use crate::errors::Result;
 use crate::tray::{SessionStats, TrayEvent};
 use anyhow::{anyhow, bail};
+use tracing::{info, warn};
 use std::mem::size_of;
 use std::path::{Path, PathBuf};
 use std::ptr;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::mpsc::UnboundedSender;
 use windows_sys::Win32::Foundation::{
     CloseHandle, GetLastError, ERROR_ALREADY_EXISTS, HANDLE, HINSTANCE, HWND, LPARAM, LRESULT,
@@ -22,18 +23,22 @@ use windows_sys::Win32::UI::Shell::{
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu, DestroyWindow, DispatchMessageW,
-    GetCursorPos, GetWindowLongPtrW, InsertMenuItemW, LoadIconW, LoadImageW, PeekMessageW,
-    PostMessageW, RegisterClassW, SetForegroundWindow, SetWindowLongPtrW, TrackPopupMenu,
-    TranslateMessage, GWLP_USERDATA, HICON, IDI_APPLICATION, IMAGE_ICON, LR_DEFAULTSIZE,
-    LR_SHARED, MENUITEMINFOW, MFT_SEPARATOR, MFT_STRING, MIIM_FTYPE, MIIM_ID, MIIM_STRING, MSG,
-    PM_REMOVE, SW_SHOWNORMAL, TPM_LEFTALIGN, TPM_NOANIMATION, TPM_RETURNCMD, TPM_RIGHTBUTTON,
-    WM_APP, WM_LBUTTONDBLCLK, WM_NCCREATE, WM_NCDESTROY, WM_NULL, WM_RBUTTONUP, WNDCLASSW,
-    WS_EX_NOACTIVATE,
+    FindWindowW, GetCursorPos, GetWindowLongPtrW, InsertMenuItemW, LoadIconW, LoadImageW,
+    PeekMessageW, PostMessageW, RegisterClassW, SetForegroundWindow, SetWindowLongPtrW,
+    TrackPopupMenu, TranslateMessage, GWLP_USERDATA, HICON, IDI_APPLICATION, IMAGE_ICON,
+    LR_DEFAULTSIZE, LR_SHARED, MENUITEMINFOW, MFT_SEPARATOR, MFT_STRING, MIIM_FTYPE, MIIM_ID,
+    MIIM_STRING, MSG, PM_REMOVE, SW_SHOWNORMAL, TPM_LEFTALIGN, TPM_NOANIMATION, TPM_RETURNCMD,
+    TPM_RIGHTBUTTON, WM_APP, WM_LBUTTONDBLCLK, WM_NCCREATE, WM_NCDESTROY, WM_NULL, WM_RBUTTONUP,
+    WNDCLASSW, WS_EX_NOACTIVATE,
 };
 
 const TRAY_ICON_ID: u32 = 1;
 const WM_TRAYICON: u32 = WM_APP + 1;
+/// Sent by a freshly launched instance to ask the running instance to exit
+/// gracefully so the new build can take over the single-instance lock.
+const WM_AURA_REQUEST_EXIT: u32 = WM_APP + 2;
 const SINGLE_INSTANCE_MUTEX_NAME: &str = "Local\\aura-tray-single-instance";
+const TRAY_REPLACEMENT_TIMEOUT: Duration = Duration::from_secs(15);
 const TRAY_ICON_RESOURCE_ID: u16 = 101;
 const TRAY_COMMAND_NEXT_BACKGROUND: u32 = 1000;
 const TRAY_COMMAND_RELOAD_SETTINGS: u32 = 1001;
@@ -88,6 +93,48 @@ pub fn try_acquire_single_instance() -> Result<Option<SingleInstanceGuard>> {
     }
 
     Ok(Some(SingleInstanceGuard { handle }))
+}
+
+/// Ask a running aura instance (if any) to shut down gracefully and block until
+/// its single-instance lock is released, so the caller can take over.
+///
+/// This powers the "new build replaces the old one" flow: instead of the new
+/// process exiting because the lock is held, it signals the existing instance
+/// through its tray window and then waits for that instance to drop the mutex.
+pub fn request_existing_instance_exit_and_wait() -> Result<()> {
+    let hwnd = unsafe { FindWindowW(wide_null("aura_tray_window").as_ptr(), ptr::null_mut()) };
+    if !hwnd.is_null() {
+        let _ = unsafe { PostMessageW(hwnd, WM_AURA_REQUEST_EXIT, 0, 0) };
+        info!("asked the running aura instance to exit");
+    } else {
+        warn!("could not locate the running instance window; will just wait for the lock to clear");
+    }
+
+    let name = wide_null(SINGLE_INSTANCE_MUTEX_NAME);
+    let deadline = Instant::now() + TRAY_REPLACEMENT_TIMEOUT;
+    loop {
+        let handle = unsafe { CreateMutexW(ptr::null_mut(), 0, name.as_ptr()) };
+        if handle.is_null() {
+            bail!("CreateMutexW failed while waiting for the existing instance");
+        }
+        let last_error = unsafe { GetLastError() };
+        if last_error == ERROR_ALREADY_EXISTS {
+            unsafe {
+                CloseHandle(handle);
+            }
+            if Instant::now() >= deadline {
+                bail!("the running instance did not exit within the timeout");
+            }
+            thread::sleep(Duration::from_millis(150));
+            continue;
+        }
+        // The lock is now free (and briefly owned by us); release it so the
+        // caller's real acquire succeeds.
+        unsafe {
+            CloseHandle(handle);
+        }
+        return Ok(());
+    }
 }
 
 pub struct TrayController {
@@ -247,6 +294,13 @@ unsafe extern "system" fn wnd_proc(
                 SetWindowLongPtrW(hwnd, GWLP_USERDATA, data_ptr);
             }
             return DefWindowProcW(hwnd, msg, wparam, lparam);
+        }
+        WM_AURA_REQUEST_EXIT => {
+            if let Some(data) = get_window_data(hwnd) {
+                let _ = data.event_tx.send(TrayEvent::Exit);
+                tracing::info!("received graceful-exit request from a new aura instance");
+            }
+            return 0;
         }
         WM_TRAYICON => {
             let event_code = lparam as u32;

@@ -4,6 +4,7 @@ use rand::rngs::SmallRng;
 use rand::seq::SliceRandom;
 use rand::SeedableRng;
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::path::Path;
 
 #[derive(Debug)]
 pub struct RotationManager {
@@ -110,6 +111,44 @@ impl RotationManager {
         self.pool.values().cloned().collect()
     }
 
+    /// Drop every pool entry whose resolved local path matches `target` (for
+    /// example an image the user deleted from the picker). Returns true if
+    /// anything was removed.
+    pub fn remove_by_path(&mut self, target: &Path) -> bool {
+        let target = target
+            .canonicalize()
+            .unwrap_or_else(|_| target.to_path_buf());
+
+        let removed_ids: Vec<String> = self
+            .pool
+            .iter()
+            .filter_map(|(id, candidate)| {
+                match candidate.local_path() {
+                    Ok(Some(path)) => {
+                        let comparable = path.canonicalize().unwrap_or_else(|_| path);
+                        if comparable == target {
+                            Some(id.clone())
+                        } else {
+                            None
+                        }
+                    }
+                    _ => None,
+                }
+            })
+            .collect();
+
+        let removed = !removed_ids.is_empty();
+        for id in removed_ids {
+            self.pool.remove(&id);
+            self.remaining.retain(|other| other != &id);
+            self.shown_current_cycle.retain(|other| other != &id);
+        }
+        if self.remaining.is_empty() {
+            self.refill_cycle();
+        }
+        removed
+    }
+
     fn refill_cycle(&mut self) {
         if self.pool.is_empty() {
             self.remaining.clear();
@@ -156,5 +195,19 @@ mod tests {
             let next = rotation.next().unwrap();
             assert!(seen.insert(next.id));
         }
+    }
+
+    #[test]
+    fn remove_by_path_drops_matching_candidate() {
+        use std::path::Path;
+
+        let mut rotation = RotationManager::new();
+        rotation.rebuild_pool(vec![candidate("a"), candidate("b"), candidate("c")]);
+        assert_eq!(rotation.pool_size(), 3);
+
+        assert!(rotation.remove_by_path(Path::new("b.jpg")));
+        assert_eq!(rotation.pool_size(), 2);
+        assert!(rotation.remove_by_path(Path::new("missing.jpg")) == false);
+        assert_eq!(rotation.pool_size(), 2);
     }
 }

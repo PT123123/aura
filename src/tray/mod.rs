@@ -12,6 +12,7 @@ pub enum TrayEvent {
     ApplyWallpaper(PathBuf),
     ApplyWallpaperToMonitor(PathBuf, usize),
     AddFavorite(PathBuf),
+    RemoveWallpaper(PathBuf),
     CheckForUpdates,
     Exit,
 }
@@ -198,7 +199,8 @@ mod windows;
 
 #[cfg(windows)]
 pub use windows::{
-    open_settings, try_acquire_single_instance, SingleInstanceGuard, TrayController,
+    open_settings, request_existing_instance_exit_and_wait, try_acquire_single_instance,
+    SingleInstanceGuard, TrayController,
 };
 
 #[cfg(windows)]
@@ -241,6 +243,11 @@ use tokio::sync::mpsc::UnboundedSender;
 #[cfg(not(any(windows, target_os = "macos")))]
 pub fn try_acquire_single_instance() -> Result<Option<SingleInstanceGuard>> {
     Ok(Some(SingleInstanceGuard))
+}
+
+#[cfg(not(windows))]
+pub fn request_existing_instance_exit_and_wait() -> Result<()> {
+    Ok(())
 }
 
 #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]

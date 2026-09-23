@@ -283,6 +283,25 @@ fn run_picker(context: PickerContext) -> Result<()> {
         }
     });
 
+    // Delete: drop the wallpaper from the running pool (main loop also removes
+    // it from the rotation/favorites and deletes the cache file) and from this
+    // window's own grid immediately.
+    let tx_delete = tray_event_tx.clone();
+    let state_delete = state.clone();
+    let weak = ui.as_weak();
+    ui.on_confirm_delete(move |path| {
+        let key = path.to_string();
+        if let Ok(mut guard) = state_delete.lock() {
+            guard.entries.retain(|entry| entry.path != key);
+            guard.favorites.remove(&key);
+        }
+        let _ = tx_delete.send(TrayEvent::RemoveWallpaper(PathBuf::from(key)));
+        if let Some(ui) = weak.upgrade() {
+            ui.set_confirm_visible(false);
+            refresh_cells(&ui, &state_delete);
+        }
+    });
+
     let state_toggle = state.clone();
     let weak = ui.as_weak();
     ui.on_toggle_monitor(move |index| {
@@ -948,6 +967,7 @@ mod tests {
             ui.on_fetch_requested(|_, _, _, _, _, _| {});
             ui.on_open_in_folder(|_| {});
             ui.on_close_window(|| {});
+            ui.on_confirm_delete(|_| {});
 
             let dir = std::env::temp_dir().join("aura-picker-filter-test");
             std::fs::create_dir_all(&dir).unwrap();

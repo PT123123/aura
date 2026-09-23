@@ -409,6 +409,12 @@ export component WallpaperPickerWindow inherits Window {
     callback fetch-requested(string, int, int, int, int, int);
     callback open-in-folder(string);
     callback close-window();
+    callback confirm-delete(string);
+
+    in-out property <bool> confirm-visible: false;
+    in-out property <string> delete-pending-path: "";
+    in-out property <bool> delete-pending-local: false;
+    in-out property <bool> selected-local: false;
 
     // ~200px per column with room for padding/spacing, clamped to 2–8 columns.
     property <int> grid-cols: max(2, min(8, round((root.width - 58px) / 200px)));
@@ -651,6 +657,15 @@ export component WallpaperPickerWindow inherits Window {
                                     title: "在文件夹中显示";
                                     activated => { root.open-in-folder(cell.path); }
                                 }
+                                MenuSeparator {}
+                                MenuItem {
+                                    title: "删除";
+                                    activated => {
+                                        root.delete-pending-path = cell.path;
+                                        root.delete-pending-local = cell.local;
+                                        root.confirm-visible = true;
+                                    }
+                                }
                             }
 
                             Rectangle {
@@ -670,7 +685,10 @@ export component WallpaperPickerWindow inherits Window {
                                     width: 100%;
                                     height: 100%;
                                     mouse-cursor: pointer;
-                                    clicked => { root.selected-path = cell.path; }
+                                    clicked => {
+                                        root.selected-path = cell.path;
+                                        root.selected-local = cell.local;
+                                    }
                                 }
 
                                 VerticalBox {
@@ -870,6 +888,59 @@ export component WallpaperPickerWindow inherits Window {
             Button {
                 text: "关闭";
                 clicked => { root.close-window(); }
+            }
+        }
+    }
+
+    // ---- delete confirmation overlay (Window-level, absolute) ----
+    if (root.confirm-visible): Rectangle {
+        x: 0;
+        y: 0;
+        width: 100%;
+        height: 100%;
+        background: #000000a8;
+
+        Rectangle {
+            x: (root.width - self.width) / 2;
+            y: (root.height - self.height) / 2;
+            width: 380px;
+            height: 188px;
+            background: #2b2f36;
+            border-radius: 10px;
+            border-width: 1px;
+            border-color: #3a3f47;
+
+            VerticalBox {
+                padding: 18px;
+                spacing: 14px;
+
+                Text {
+                    text: root.delete-pending-local ? "永久删除这张本地图片？" : "从缓存中删除这张壁纸？";
+                    color: #f0f0f0;
+                    font-size: 15px;
+                    font-weight: 600;
+                }
+                Text {
+                    text: root.delete-pending-local
+                        ? "将删除磁盘上的原始文件，操作不可恢复。"
+                        : "将删除缓存文件并停止轮换，操作不可恢复。";
+                    color: #b8b8b8;
+                    font-size: 12px;
+                    wrap: word-wrap;
+                }
+                HorizontalBox {
+                    spacing: 10px;
+                    alignment: end;
+                    Button {
+                        text: "取消";
+                        clicked => { root.confirm-visible = false; }
+                    }
+                    Button {
+                        text: "删除";
+                        primary: true;
+                        clicked => { root.confirm-delete(root.delete-pending-path); }
+                    }
+                }
             }
         }
     }
