@@ -356,6 +356,8 @@ export component WallpaperPickerWindow inherits Window {
 
     in property <[WallpaperCell]> cells: [];
     in property <[MonitorChip]> monitors: [];
+    /// Shared chip width for the display row, sized by the widest display name.
+    in property <length> monitor-chip-width: 96px;
     in property <bool> loading: true;
     in property <bool> fetching: false;
     in property <string> fetch-status: "";
@@ -804,6 +806,7 @@ export component WallpaperPickerWindow inherits Window {
                 for monitor[idx] in root.monitors: PickerChip {
                     label: monitor.name;
                     active: monitor.selected;
+                    chip-width: root.monitor-chip-width;
                     clicked => { root.toggle-monitor(idx); }
                 }
 

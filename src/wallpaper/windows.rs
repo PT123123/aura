@@ -13,7 +13,8 @@ use windows_sys::Win32::System::Com::{
     CoCreateInstance, CoInitializeEx, CoTaskMemFree, CLSCTX_ALL, COINIT_APARTMENTTHREADED,
 };
 use windows_sys::Win32::System::Registry::{
-    RegCloseKey, RegOpenKeyExW, RegSetValueExW, HKEY, HKEY_CURRENT_USER, KEY_SET_VALUE, REG_SZ,
+    RegCloseKey, RegOpenKeyExW, RegQueryValueExW, RegSetValueExW, HKEY, HKEY_CURRENT_USER,
+    HKEY_LOCAL_MACHINE, KEY_READ, KEY_SET_VALUE, REG_SZ,
 };
 use windows_sys::Win32::UI::Shell::DesktopWallpaper;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
@@ -168,12 +169,7 @@ impl WallpaperBackend for WindowsWallpaperBackend {
     }
 
     fn monitor_names(&self) -> Result<Vec<String>> {
-        let monitors = self.real_monitor_ids()?;
-        Ok(monitors
-            .iter()
-            .enumerate()
-            .map(|(index, _)| format!("显示器 {}", index + 1))
-            .collect())
+        Ok(monitor_names_for(&self.real_monitor_ids()?))
     }
 
     fn set_wallpaper_for_monitor(&self, path: &Path, monitor_index: usize) -> Result<()> {
@@ -255,6 +251,149 @@ impl WallpaperBackend for WindowsWallpaperBackend {
     }
 }
 
+/// Human-readable names for the displays identified by `monitors`.
+///
+/// `IDesktopWallpaper` only hands out opaque device interface paths, so each
+/// name is recovered from the EDID block the display driver publishes in the
+/// registry. Displays whose EDID cannot be read — or that carry no name
+/// descriptor, as some virtual panels do — fall back to `显示器 <n>`.
+fn monitor_names_for(monitors: &[Vec<u16>]) -> Vec<String> {
+    monitors
+        .iter()
+        .enumerate()
+        .map(|(index, id)| {
+            let path = wide_to_string(id);
+            path.as_deref()
+                .and_then(edid_monitor_name)
+                .or_else(|| path.as_deref().and_then(display_pnp_id))
+                .unwrap_or_else(|| format!("显示器 {}", index + 1))
+        })
+        .collect()
+}
+
+/// The EDID vendor/product segment of a display interface path, e.g. `LEN8BA1`.
+///
+/// Used when a panel publishes no name descriptor: the panel id is still a real
+/// identifier that can be matched against Device Manager, which beats an
+/// anonymous `显示器 N`.
+fn display_pnp_id(device_path: &str) -> Option<String> {
+    let mut segments = device_path.split('#');
+    segments.next()?; // leading "\\?\DISPLAY"
+    let pnp_id = segments.next()?;
+    (!pnp_id.is_empty()).then(|| pnp_id.to_string())
+}
+
+fn wide_to_string(wide: &[u16]) -> Option<String> {
+    let end = wide.iter().position(|unit| *unit == 0).unwrap_or(wide.len());
+    if end == 0 {
+        return None;
+    }
+    Some(String::from_utf16_lossy(&wide[..end]))
+}
+
+/// Reads the monitor name out of a display's EDID block.
+///
+/// `device_path` is the interface path returned by
+/// `IDesktopWallpaper::GetMonitorDevicePathAt`, e.g.
+/// `\\?\DISPLAY#LEN8BA1#4&2c6c98d4&0&UID8388688#{e6f07b5f-...}`. Its middle
+/// segments are exactly the registry key components, which makes the lookup
+/// exact rather than dependent on enumeration order.
+fn edid_monitor_name(device_path: &str) -> Option<String> {
+    let mut segments = device_path.split('#');
+    segments.next()?; // leading "\\?\DISPLAY"
+    let pnp_id = segments.next()?;
+    let instance = segments.next()?;
+    if pnp_id.is_empty() || instance.is_empty() {
+        return None;
+    }
+
+    let subkey = wide_null(&format!(
+        "SYSTEM\\CurrentControlSet\\Enum\\DISPLAY\\{pnp_id}\\{instance}\\Device Parameters"
+    ));
+
+    let mut key: HKEY = ptr::null_mut();
+    let status = unsafe { RegOpenKeyExW(HKEY_LOCAL_MACHINE, subkey.as_ptr(), 0, KEY_READ, &mut key) };
+    if status != ERROR_SUCCESS {
+        return None;
+    }
+
+    let edid = read_reg_binary(key, "EDID");
+    unsafe { RegCloseKey(key) };
+    edid_descriptor_name(edid.as_deref()?)
+}
+
+fn read_reg_binary(key: HKEY, value_name: &str) -> Option<Vec<u8>> {
+    let name = wide_null(value_name);
+
+    let mut data_len: u32 = 0;
+    let status = unsafe {
+        RegQueryValueExW(
+            key,
+            name.as_ptr(),
+            ptr::null(),
+            ptr::null_mut(),
+            ptr::null_mut(),
+            &mut data_len,
+        )
+    };
+    if status != ERROR_SUCCESS || data_len == 0 {
+        return None;
+    }
+
+    let mut buffer = vec![0u8; data_len as usize];
+    let mut written = data_len;
+    let status = unsafe {
+        RegQueryValueExW(
+            key,
+            name.as_ptr(),
+            ptr::null(),
+            ptr::null_mut(),
+            buffer.as_mut_ptr(),
+            &mut written,
+        )
+    };
+    if status != ERROR_SUCCESS {
+        return None;
+    }
+    buffer.truncate(written as usize);
+    Some(buffer)
+}
+
+/// Extracts the display name from an EDID 1.x block.
+///
+/// The four 18-byte descriptor slots start at offset 54. `0xFC` holds the
+/// monitor name proper, while `0xFE` is a free-form string that vendors
+/// commonly use for brand plus model — Lenovo, for instance, emits two `0xFE`
+/// descriptors (`LENOVO`, then `LEN160-3.2K`), so the last one is kept. A
+/// `0xFC` descriptor always wins when present.
+fn edid_descriptor_name(edid: &[u8]) -> Option<String> {
+    let mut free_form = None;
+    for offset in [54usize, 72, 90, 108] {
+        let Some(descriptor) = edid.get(offset..offset + 18) else {
+            continue;
+        };
+        if descriptor[0..3] != [0x00, 0x00, 0x00] {
+            continue;
+        }
+        let kind = descriptor[3];
+        if kind != 0xFC && kind != 0xFE {
+            continue;
+        }
+        // 13 bytes of payload, terminated by 0x0A and padded with spaces.
+        let payload = &descriptor[5..18];
+        let payload = payload.split(|byte| *byte == 0x0A).next().unwrap_or(payload);
+        let text = String::from_utf8_lossy(payload).trim().to_string();
+        if text.is_empty() {
+            continue;
+        }
+        if kind == 0xFC {
+            return Some(text);
+        }
+        free_form = Some(text);
+    }
+    free_form
+}
+
 fn enforce_fill_style() -> Result<()> {
     let mut key: HKEY = ptr::null_mut();
     let subkey = wide_null("Control Panel\\Desktop");
@@ -322,6 +461,62 @@ mod tests {
         let count = backend.monitor_count().expect("monitor enumeration should succeed");
         assert!(count >= 1, "expected at least one connected monitor");
         eprintln!("aura: connected monitors = {count}");
+    }
+
+    /// EDID name descriptors must be read exactly as panels emit them.
+    #[test]
+    fn edid_descriptor_name_prefers_monitor_name_over_free_form() {
+        // Lenovo-style: two free-form descriptors, brand first, model last.
+        let mut edid = vec![0u8; 128];
+        edid[54..72].copy_from_slice(&edid_descriptor(0xFE, "LENOVO"));
+        edid[72..90].copy_from_slice(&edid_descriptor(0xFE, "LEN160-3.2K"));
+        assert_eq!(edid_descriptor_name(&edid).as_deref(), Some("LEN160-3.2K"));
+
+        // A real monitor-name descriptor outranks the free-form string.
+        let mut edid = vec![0u8; 128];
+        edid[54..72].copy_from_slice(&edid_descriptor(0xFE, "XIAOMI"));
+        edid[90..108].copy_from_slice(&edid_descriptor(0xFC, "P27QBD-RG"));
+        assert_eq!(edid_descriptor_name(&edid).as_deref(), Some("P27QBD-RG"));
+
+        // Panels that publish nothing usable (or no EDID at all) yield None.
+        assert_eq!(edid_descriptor_name(&[0u8; 128]), None);
+        assert_eq!(edid_descriptor_name(&[]), None);
+    }
+
+    #[test]
+    fn monitor_names_fall_back_when_the_device_path_cannot_be_resolved() {
+        // A panel whose EDID cannot be read still exposes its panel id.
+        let monitors = vec![
+            wide_null(r"\\?\DISPLAY#AURA00#0&0&0&0&0000#{00000000-0000-0000-0000-000000000000}"),
+            wide_null(r"\\?\DISPLAY#AURA01#0&0&0&0&0000#{00000000-0000-0000-0000-000000000000}"),
+        ];
+        assert_eq!(monitor_names_for(&monitors), vec!["AURA00", "AURA01"]);
+
+        // Only a path with no usable segment drops to the index label.
+        assert_eq!(monitor_names_for(&[Vec::new(), vec![0]]), vec!["显示器 1", "显示器 2"]);
+    }
+
+    #[test]
+    fn reports_the_names_of_connected_monitors() {
+        let backend = WindowsWallpaperBackend::new();
+        let names = backend
+            .monitor_names()
+            .expect("monitor names should be available");
+        assert_eq!(
+            names.len(),
+            backend.monitor_count().expect("monitor count should be available"),
+            "every display must get a name"
+        );
+        eprintln!("aura: monitor names = {names:?}");
+    }
+
+    fn edid_descriptor(kind: u8, text: &str) -> [u8; 18] {
+        let mut descriptor = [0x20u8; 18]; // space padded
+        descriptor[0..4].copy_from_slice(&[0x00, 0x00, 0x00, kind]);
+        descriptor[4] = 0x00;
+        descriptor[5..5 + text.len()].copy_from_slice(text.as_bytes());
+        descriptor[5 + text.len()] = 0x0A;
+        descriptor
     }
 
     #[test]

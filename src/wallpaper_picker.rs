@@ -450,6 +450,30 @@ fn push_monitors(ui: &WallpaperPickerWindow, state: &PickerState) {
     let model: ModelRc<MonitorChip> = std::rc::Rc::new(VecModel::from(chips)).into();
     ui.set_monitors(model);
     ui.set_selected_monitor_count(selected);
+    ui.set_monitor_chip_width(monitor_chip_width(&state.monitor_names));
+}
+
+/// Width for the display chips in the picker footer.
+///
+/// The backend reports real display names now, and their length varies a lot
+/// (`P27QBD-RG` versus `显示器 2`). Slint cannot measure text from here, so each
+/// label is measured conservatively — CJK glyphs occupy a full 12px cell,
+/// everything else roughly half — and the widest one sets a shared width so the
+/// row stays visually aligned.
+fn monitor_chip_width(names: &[String]) -> f32 {
+    const MIN_WIDTH: f32 = 96.0;
+    const PADDING: f32 = 30.0;
+
+    names
+        .iter()
+        .map(|name| {
+            let text: f32 = name
+                .chars()
+                .map(|character| if character.is_ascii() { 6.8 } else { 12.0 })
+                .sum();
+            text + PADDING
+        })
+        .fold(MIN_WIDTH, f32::max)
 }
 
 /// Probe every known wallpaper on a worker thread and stream the results into
@@ -990,6 +1014,30 @@ mod tests {
             let _ = ui.hide();
             std::fs::remove_dir_all(&dir).ok();
         });
+    }
+
+    #[test]
+    fn monitor_chip_width_covers_the_widest_label() {
+        assert_eq!(monitor_chip_width(&[]), 96.0, "empty input keeps the floor");
+        assert_eq!(monitor_chip_width(&[String::new()]), 96.0);
+
+        // A device name is wider than the floor...
+        let device = monitor_chip_width(&["LEN160-3.2K".to_string()]);
+        assert!(device > 96.0 && device < 140.0, "unexpected width {device}");
+
+        // ...and CJK glyphs occupy a full cell, not an ASCII one.
+        assert!(
+            monitor_chip_width(&["显示器屏幕名称".to_string()])
+                > monitor_chip_width(&["abcdefg".to_string()]),
+            "CJK glyphs must not be measured like ASCII"
+        );
+
+        // The widest label sets the shared width.
+        let mixed = vec!["短".to_string(), "LEN160-3.2K".to_string()];
+        assert_eq!(
+            monitor_chip_width(&mixed),
+            monitor_chip_width(&["LEN160-3.2K".to_string()])
+        );
     }
 
     /// The display chooser must round-trip through the monitor model.
