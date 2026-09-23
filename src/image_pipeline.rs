@@ -114,6 +114,7 @@ mod tests {
             max_cache_age: Duration::from_secs(24 * 60 * 60),
             renderer: RendererMode::Image,
             shader: None,
+            proxy: None,
         };
         CacheManager::new(&config).unwrap()
     }

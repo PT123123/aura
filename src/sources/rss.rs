@@ -150,6 +150,19 @@ pub async fn resolve_image_path(download_dir: &Path, image_url: &str) -> Result<
     }
 }
 
+/// Proxy registered from the configuration file before the first request.
+///
+/// The HTTP client below is memoized on first use, so this has to be called
+/// during startup — a later change only takes effect on the next launch.
+static CONFIGURED_PROXY: OnceLock<Option<String>> = OnceLock::new();
+
+/// Register the `proxy` config value used by every remote source.
+pub(crate) fn configure_client_proxy(proxy: Option<String>) {
+    if CONFIGURED_PROXY.set(proxy).is_err() {
+        tracing::debug!("HTTP client proxy already configured; ignoring later change");
+    }
+}
+
 pub(crate) fn shared_client() -> &'static Client {
     static CLIENT: OnceLock<Client> = OnceLock::new();
     CLIENT.get_or_init(|| {
@@ -162,15 +175,43 @@ pub(crate) fn shared_client() -> &'static Client {
             .connect_timeout(Duration::from_secs(10))
             .timeout(Duration::from_secs(30));
 
+        // Explicit config wins over the environment: on networks where the
+        // remote hosts are blocked the user has to name a local proxy, and an
+        // inherited HTTPS_PROXY is not always the one that can reach them.
+        let mut applied = false;
+        if let Some(proxy_url) = CONFIGURED_PROXY
+            .get()
+            .and_then(|proxy| proxy.as_deref())
+            .map(str::trim)
+            .filter(|proxy_url| !proxy_url.is_empty())
+        {
+            match reqwest::Proxy::all(proxy_url) {
+                Ok(proxy) => {
+                    builder = builder.proxy(proxy);
+                    applied = true;
+                    tracing::info!(proxy = proxy_url, "remote sources will use the configured proxy");
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        proxy = proxy_url,
+                        error = %error,
+                        "configured proxy is invalid; falling back to the environment"
+                    );
+                }
+            }
+        }
+
         // reqwest does not consult the HTTP(S)_PROXY environment variables by
         // default (and 0.13 dropped system-proxy discovery entirely), so read
         // them explicitly to let remote sources (RSS, Wallhaven) work behind
         // a local proxy.
-        for variable in ["HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"] {
-            if let Ok(proxy_url) = std::env::var(variable) {
-                if let Ok(proxy) = reqwest::Proxy::all(&proxy_url) {
-                    builder = builder.proxy(proxy);
-                    break;
+        if !applied {
+            for variable in ["HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"] {
+                if let Ok(proxy_url) = std::env::var(variable) {
+                    if let Ok(proxy) = reqwest::Proxy::all(&proxy_url) {
+                        builder = builder.proxy(proxy);
+                        break;
+                    }
                 }
             }
         }

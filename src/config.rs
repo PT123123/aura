@@ -155,6 +155,7 @@ struct RawConfig {
     max_cache_age_days: Option<Lenient<u64>>,
     renderer: Option<Lenient<RendererMode>>,
     shader: Option<Lenient<RawShaderConfig>>,
+    proxy: Option<Lenient<String>>,
     #[serde(flatten)]
     extra: hcl::Map<String, hcl::Value>,
 }
@@ -204,6 +205,12 @@ pub struct AuraConfig {
     pub max_cache_age: Duration,
     pub renderer: RendererMode,
     pub shader: Option<ShaderConfig>,
+    /// Optional HTTP(S) proxy used by every remote source (RSS, Wallhaven).
+    ///
+    /// Remote sources are unreachable on networks where those hosts are
+    /// blocked, so a local proxy can be configured explicitly instead of
+    /// relying on the `HTTPS_PROXY` environment variables alone.
+    pub proxy: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -299,10 +306,13 @@ renderer = "image"
 # Image mode options (used when renderer = "image")
 image = {{
 	# Image sources. Multiple sources will be combined together to pick the next wallpaper from.
-	# Supported source types: "file" | "directory" | "rss"
+	# Supported source types: "file" | "directory" | "rss" | "wallhaven"
 	sources = [
         # RSS feed of ambient-tv images (~120 high-quality images)
         {{ type = "rss", url = "https://mrrtt.me/atv" }}
+
+        # Wallhaven search results (https://wallhaven.cc)
+        #{{ type = "wallhaven", query = "aurora", categories = "general", purity = "sfw", sorting = "toplist", topRange = "1M", atleast = "2560x1440", maxItems = 24 }}
 
         # Your own directory of images
         #{{ type = "directory", path = "{}" }}
@@ -329,6 +339,11 @@ updater = {{
     checkInterval = "6h"
     feedUrl = "https://github.com/hmerritt/aura/releases/latest/download"
 }}
+
+# Optional HTTP(S) proxy shared by every remote source (RSS / Wallhaven).
+# Remote hosts can be unreachable without one; falls back to the
+# HTTPS_PROXY / HTTP_PROXY environment variables when unset.
+#proxy = "http://127.0.0.1:10809"
 "#,
         pictures
     )
@@ -423,6 +438,15 @@ impl AuraConfig {
         )
         .unwrap_or_else(|| "info".to_string());
 
+        let proxy = take_lenient(
+            "proxy",
+            raw.proxy,
+            &mut warnings,
+            "remote sources will fall back to the HTTPS_PROXY environment variables",
+        )
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+
         Ok(ConfigWithWarnings {
             config: Self {
                 image,
@@ -434,6 +458,7 @@ impl AuraConfig {
                 max_cache_age,
                 renderer,
                 shader,
+                proxy,
             },
             warnings,
         })

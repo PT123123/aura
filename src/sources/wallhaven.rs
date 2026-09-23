@@ -18,6 +18,53 @@ use url::Url;
 
 const DEFAULT_API_BASE: &str = "https://wallhaven.cc/api/v1";
 
+/// Wallhaven encodes `categories` and `purity` as three-bit flag strings
+/// (`1` = include) while the config file and the settings window write human
+/// names such as `"general,anime"` or `"sfw"`.
+///
+/// The API silently ignores a value it cannot parse, which would quietly widen
+/// the search to every category or purity instead of failing, so both shapes
+/// are normalised into the flag string it actually honours.
+fn normalize_flag(raw: &str, known: [&str; 3], default_all: bool) -> String {
+    let trimmed = raw.trim();
+    if trimmed.len() == 3 && trimmed.chars().all(|flag| flag == '0' || flag == '1') {
+        return trimmed.to_string();
+    }
+
+    let lowered = trimmed.to_ascii_lowercase();
+    let mut flags = [false; 3];
+    let mut matched = false;
+    for part in lowered.split(',') {
+        let part = part.trim();
+        if part.is_empty() {
+            continue;
+        }
+        if let Some(index) = known.iter().position(|name| *name == part) {
+            flags[index] = true;
+            matched = true;
+        }
+    }
+
+    if !matched {
+        // An empty or unrecognised value means "no restriction" for categories
+        // but "safe for work" for purity.
+        return if default_all { "111" } else { "100" }.to_string();
+    }
+
+    flags
+        .iter()
+        .map(|flag| if *flag { '1' } else { '0' })
+        .collect()
+}
+
+fn normalize_categories(raw: &str) -> String {
+    normalize_flag(raw, ["general", "people", "anime"], true)
+}
+
+fn normalize_purity(raw: &str) -> String {
+    normalize_flag(raw, ["sfw", "sketchy", "nsfw"], false)
+}
+
 #[derive(Debug, Clone)]
 pub struct WallhavenSource {
     query: Option<String>,
@@ -95,8 +142,8 @@ impl WallhavenSource {
                     query.append_pair("q", q.trim());
                 }
             }
-            query.append_pair("categories", &self.categories);
-            query.append_pair("purity", &self.purity);
+            query.append_pair("categories", &normalize_categories(&self.categories));
+            query.append_pair("purity", &normalize_purity(&self.purity));
             query.append_pair("sorting", &self.sorting);
             if self.sorting == "toplist" && !self.top_range.is_empty() {
                 query.append_pair("topRange", &self.top_range);
@@ -204,6 +251,40 @@ mod tests {
     use crate::sources::ImageSource;
     use crate::sources::rss::test_support::{ResponseSpec, TestServer};
 
+    /// Human-readable config values must reach the API as bit flags, otherwise
+    /// Wallhaven ignores them and silently returns every category.
+    #[test]
+    fn normalises_human_readable_category_and_purity_values() {
+        assert_eq!(normalize_categories("general,people,anime"), "111");
+        assert_eq!(normalize_categories("general,anime"), "101");
+        assert_eq!(normalize_categories("people"), "010");
+        assert_eq!(
+            normalize_categories("unknown-name"),
+            "111",
+            "unknown names fall back to all"
+        );
+        assert_eq!(normalize_categories(""), "111");
+        assert_eq!(normalize_categories("111"), "111");
+        assert_eq!(normalize_categories("001"), "001");
+
+        assert_eq!(normalize_purity("sfw"), "100");
+        assert_eq!(normalize_purity("sfw,sketchy"), "110");
+        assert_eq!(normalize_purity("sketchy,nsfw"), "011");
+        assert_eq!(normalize_purity(""), "100", "an empty purity stays safe for work");
+        assert_eq!(normalize_purity("110"), "110");
+    }
+
+    /// The search URL must carry the normalised flags.
+    #[test]
+    fn search_url_uses_normalised_flags() {
+        let source = WallhavenSource::new(&wallhaven_config(), PathBuf::from("wh")).unwrap();
+        let url = source.search_url(3).unwrap().to_string();
+
+        assert!(url.contains("categories=111"), "url was {url}");
+        assert!(url.contains("purity=100"), "url was {url}");
+        assert!(url.contains("page=3"), "url was {url}");
+    }
+
     fn wallhaven_config() -> SourceConfig {
         SourceConfig::Wallhaven {
             query: Some("aurora".to_string()),
@@ -296,8 +377,10 @@ mod tests {
         let params: std::collections::HashMap<String, String> =
             url.query_pairs().into_owned().collect();
         assert_eq!(params.get("q").map(String::as_str), Some("aurora"));
-        assert_eq!(params.get("categories").map(String::as_str), Some("general,people,anime"));
-        assert_eq!(params.get("purity").map(String::as_str), Some("sfw"));
+        // Wallhaven only honours the bit-flag form, so the human-readable
+        // config values are normalised before they reach the query string.
+        assert_eq!(params.get("categories").map(String::as_str), Some("111"));
+        assert_eq!(params.get("purity").map(String::as_str), Some("100"));
         assert_eq!(params.get("sorting").map(String::as_str), Some("toplist"));
         assert_eq!(params.get("topRange").map(String::as_str), Some("1M"));
         assert_eq!(params.get("atleast").map(String::as_str), Some("1920x1080"));

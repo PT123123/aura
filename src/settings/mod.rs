@@ -182,6 +182,7 @@ fn fill_ui_from_config(ui: &SettingsWindow, config: &AuraConfig) {
     });
     ui.set_cache_dir(config.cache_dir.to_string_lossy().into_owned().into());
     ui.set_state_file(config.state_file.to_string_lossy().into_owned().into());
+    ui.set_proxy_url(config.proxy.clone().unwrap_or_default().into());
     fill_wallhaven_from_config(ui, config);
 }
 
@@ -376,6 +377,16 @@ fn save_config_from_ui(ui: &SettingsWindow, config_path: &Path) -> Result<()> {
     )?;
     set_object_string(&mut root, "updater", "feedUrl", &ui.get_feed_url())?;
     set_object_string(&mut root, "", "log_level", log_level_str(ui.get_log_level_index()))?;
+
+    // An empty proxy field removes the key entirely so the environment
+    // variables stay in charge instead of an empty override.
+    let proxy = ui.get_proxy_url().trim().to_string();
+    let root_map = ensure_object(&mut root, "")?;
+    if proxy.is_empty() {
+        root_map.shift_remove("proxy");
+    } else {
+        root_map.insert("proxy".to_string(), hcl::Value::from(proxy.as_str()));
+    }
 
     save_wallhaven_to_root(&mut root, ui)?;
 

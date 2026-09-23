@@ -193,6 +193,10 @@ async fn run(args: Vec<String>, debug_requested: bool) -> Result<()> {
     }
     info!(path = %config_path.display(), "loaded config");
 
+    // Must happen before the first remote request: the shared HTTP client is
+    // memoized on first use and reads the proxy only once.
+    crate::sources::rss::configure_client_proxy(config.proxy.clone());
+
     let mut cache = Arc::new(CacheManager::new(&config)?);
     if let Err(error) = cache.cleanup() {
         warn!(error = %error, "cache cleanup failed");
@@ -801,15 +805,6 @@ async fn run(args: Vec<String>, debug_requested: bool) -> Result<()> {
                     Some(TrayEvent::OpenWallpaperPicker) => {
                         #[cfg(windows)]
                         {
-                            let remote_images = match cache.list_remote_images() {
-                                Ok(images) => images,
-                                Err(error) => {
-                                    warn!(error = %error, "failed to list remote cache images");
-                                    Vec::new()
-                                }
-                            };
-                            let local_images =
-                                wallpaper_picker::collect_local_images(&config.image.sources);
                             let monitor_names = match backend.monitor_names() {
                                 Ok(names) => names,
                                 Err(error) => {
@@ -817,12 +812,25 @@ async fn run(args: Vec<String>, debug_requested: bool) -> Result<()> {
                                     Vec::new()
                                 }
                             };
+                            // The picker's fetch panel starts from the user's
+                            // configured Wallhaven source (API key, top range).
+                            let default_wallhaven = config
+                                .image
+                                .sources
+                                .iter()
+                                .find(|source| {
+                                    matches!(source, crate::config::SourceConfig::Wallhaven { .. })
+                                })
+                                .cloned();
                             crate::wallpaper_picker::open_wallpaper_picker(
-                                remote_images,
-                                local_images,
-                                monitor_names,
-                                favorites.clone(),
-                                tray_event_tx.clone(),
+                                crate::wallpaper_picker::PickerContext {
+                                    cache: cache.clone(),
+                                    local_sources: config.image.sources.clone(),
+                                    monitor_names,
+                                    favorites: favorites.clone(),
+                                    default_wallhaven,
+                                    tray_event_tx: tray_event_tx.clone(),
+                                },
                             );
                         }
                         #[cfg(not(windows))]
@@ -1925,6 +1933,7 @@ mod tests {
             max_cache_age: Duration::from_secs(24 * 60 * 60),
             renderer: RendererMode::Image,
             shader: None,
+            proxy: None,
         }
     }
 

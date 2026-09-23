@@ -38,6 +38,7 @@ export component SettingsWindow inherits Window {
     in-out property <int> log-level-index: 2;
     in-out property <string> cache-dir: "";
     in-out property <string> state-file: "";
+    in-out property <string> proxy-url: "";
     in-out property <string> status-text: "";
 
     callback save();
@@ -267,6 +268,21 @@ export component SettingsWindow inherits Window {
                             Text { text: "状态文件"; color: #e0e0e0; vertical-alignment: center; }
                             LineEdit { text: root.state-file; enabled: false; }
                         }
+                        HorizontalBox {
+                            spacing: 8px;
+                            Text { text: "HTTP 代理"; color: #e0e0e0; vertical-alignment: center; }
+                            LineEdit {
+                                text: root.proxy-url;
+                                placeholder-text: "如 http://127.0.0.1:10809（留空则用环境变量）";
+                                edited => { root.proxy-url = self.text; }
+                            }
+                        }
+                        Text {
+                            text: "远程图源（RSS / Wallhaven）走这个代理；保存并重载后生效。";
+                            color: #8a8a8a;
+                            font-size: 11px;
+                            wrap: word-wrap;
+                        }
                     }
                 }
             }
@@ -288,42 +304,116 @@ struct WallpaperCell {
     thumb: image,
     name: string,
     favorited: bool,
+    meta: string,
+    local: bool,
+}
+
+struct MonitorChip {
+    name: string,
+    selected: bool,
+}
+
+// Small pill-shaped toggle used by the display chooser and the per-card
+// hover actions.
+component PickerChip inherits Rectangle {
+    in property <string> label: "";
+    in property <bool> active: false;
+    in property <length> chip-width: 96px;
+    callback clicked();
+
+    width: chip-width;
+    height: 26px;
+    border-radius: 13px;
+    background: active ? #2f5d8f : #2b2f36;
+    border-width: 1px;
+    border-color: active ? #4a90d9 : #3a4048;
+
+    Text {
+        text: root.label;
+        color: root.active ? #ffffff : #c8c8c8;
+        font-size: 12px;
+        width: 100%;
+        height: 100%;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+
+    chip-touch := TouchArea {
+        width: 100%;
+        height: 100%;
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
 }
 
 export component WallpaperPickerWindow inherits Window {
     title: "选择壁纸";
-    preferred-width: 960px;
-    preferred-height: 680px;
-    min-width: 640px;
-    min-height: 480px;
+    preferred-width: 1100px;
+    preferred-height: 740px;
+    min-width: 780px;
+    min-height: 560px;
     background: #1e1e1e;
 
     in property <[WallpaperCell]> cells: [];
-    in property <[string]> monitor-names: [];
+    in property <[MonitorChip]> monitors: [];
     in property <bool> loading: true;
+    in property <bool> fetching: false;
+    in property <string> fetch-status: "";
     in property <int> total-count: 0;
     in property <int> shown-count: 0;
+    in property <int> selected-monitor-count: 0;
     in-out property <string> search-text: "";
     in-out property <bool> favorites-only: false;
+    in-out property <int> source-index: 0;
+    in-out property <int> min-resolution-index: 0;
+    in-out property <int> sort-index: 0;
     in-out property <string> selected-path: "";
+    in-out property <string> fetch-query: "";
+    in-out property <int> fetch-count: 24;
+    in-out property <int> fetch-category-index: 0;
+    in-out property <int> fetch-purity-index: 0;
+    in-out property <int> fetch-sorting-index: 0;
+    in-out property <int> fetch-atleast-index: 0;
+    in-out property <bool> fetch-panel-open: false;
+
     callback apply-all(string);
     callback apply-to-monitor(string, int);
+    callback apply-to-selection(string);
     callback add-favorite(string);
-    callback filter-changed(string, bool);
+    callback search-changed(string);
+    callback favorites-toggled(bool);
+    callback source-changed(int);
+    callback min-resolution-changed(int);
+    callback sort-changed(int);
+    callback toggle-monitor(int);
+    callback select-all-monitors(bool);
+    callback refresh-requested();
+    callback fetch-requested(string, int, int, int, int, int);
+    callback open-in-folder(string);
     callback close-window();
 
-    // ~210px per column with room for padding/spacing, clamped to 2–6 columns.
-    property <int> grid-cols: max(2, min(6, round((root.width - 58px) / 210px)));
+    // ~200px per column with room for padding/spacing, clamped to 2–8 columns.
+    property <int> grid-cols: max(2, min(8, round((root.width - 58px) / 200px)));
+
     out property <string> status-text: root.loading
         ? "正在加载缩略图…"
         : root.shown-count == 0
-            ? (root.total-count == 0 ? "暂无可用壁纸" : "没有匹配的壁纸，换个关键词试试")
-            : "显示 " + root.shown-count + " / " + root.total-count + " 张 · 单击选择，右键可应用到指定屏幕或收藏";
+            ? (root.total-count == 0
+                ? "本地暂无可用壁纸，点右上角「获取更多」在线拉取"
+                : "没有匹配的壁纸，放宽筛选条件试试")
+            : "显示 " + root.shown-count + " / " + root.total-count + " 张";
+
+    out property <string> screen-summary: root.monitors.length == 0
+        ? "未检测到显示器枚举，将应用到全部屏幕"
+        : root.selected-monitor-count == 0
+            ? "未勾选屏幕 → 应用时作用于全部屏幕"
+            : "已勾选 " + root.selected-monitor-count + " 个屏幕";
 
     VerticalBox {
         padding: 12px;
         spacing: 10px;
 
+        // ---- title / search / toolbar ----
         HorizontalBox {
             spacing: 8px;
             Text {
@@ -340,7 +430,155 @@ export component WallpaperPickerWindow inherits Window {
                 text: root.search-text;
                 edited(text) => {
                     root.search-text = text;
-                    root.filter-changed(text, root.favorites-only);
+                    root.search-changed(text);
+                }
+            }
+            Button {
+                text: root.fetch-panel-open ? "收起拉取" : "获取更多…";
+                clicked => { root.fetch-panel-open = !root.fetch-panel-open; }
+            }
+            Button {
+                text: "重新扫描";
+                clicked => { root.refresh-requested(); }
+            }
+        }
+
+        // ---- online fetch panel ----
+        Rectangle {
+            visible: root.fetch-panel-open;
+            background: #23272e;
+            border-radius: 6px;
+            border-width: 1px;
+            border-color: #2f353d;
+
+            VerticalBox {
+                padding: 10px;
+                spacing: 8px;
+
+                Text {
+                    text: "从 Wallhaven 在线获取更多壁纸";
+                    color: #e0e0e0;
+                    font-size: 13px;
+                    font-weight: 600;
+                }
+
+                HorizontalBox {
+                    spacing: 6px;
+                    Text { text: "关键词"; color: #9a9a9a; font-size: 12px; vertical-alignment: center; }
+                    LineEdit {
+                        horizontal-stretch: 1;
+                        placeholder-text: "留空 = 不限主题；中文标签如「风景」请用英文关键词";
+                        text: root.fetch-query;
+                        edited(text) => { root.fetch-query = text; }
+                    }
+                    Text { text: "数量"; color: #9a9a9a; font-size: 12px; vertical-alignment: center; }
+                    SpinBox {
+                        minimum: 4;
+                        maximum: 96;
+                        value: root.fetch-count;
+                        edited => { root.fetch-count = round(self.value); }
+                    }
+                }
+
+                HorizontalBox {
+                    spacing: 6px;
+                    Text { text: "分类"; color: #9a9a9a; font-size: 12px; vertical-alignment: center; }
+                    ComboBox {
+                        min-width: 150px;
+                        model: ["通用+人物+动漫", "general 通用", "people 人物", "anime 动漫"];
+                        current-index: root.fetch-category-index;
+                        selected => { root.fetch-category-index = self.current-index; }
+                    }
+                    Text { text: "纯度"; color: #9a9a9a; font-size: 12px; vertical-alignment: center; }
+                    ComboBox {
+                        min-width: 116px;
+                        model: ["仅 SFW", "含 Sketchy", "含 NSFW"];
+                        current-index: root.fetch-purity-index;
+                        selected => { root.fetch-purity-index = self.current-index; }
+                    }
+                    Text { text: "排序"; color: #9a9a9a; font-size: 12px; vertical-alignment: center; }
+                    ComboBox {
+                        min-width: 130px;
+                        model: ["随机", "最新", "榜单", "浏览量", "收藏数"];
+                        current-index: root.fetch-sorting-index;
+                        selected => { root.fetch-sorting-index = self.current-index; }
+                    }
+                    Text { text: "最低分辨率"; color: #9a9a9a; font-size: 12px; vertical-alignment: center; }
+                    ComboBox {
+                        min-width: 116px;
+                        model: ["不限", "1920x1080", "2560x1440", "3840x2160"];
+                        current-index: root.fetch-atleast-index;
+                        selected => { root.fetch-atleast-index = self.current-index; }
+                    }
+                }
+
+                HorizontalBox {
+                    spacing: 8px;
+                    Button {
+                        text: root.fetching ? "拉取中…" : "开始拉取";
+                        primary: true;
+                        enabled: !root.fetching;
+                        clicked => {
+                            root.fetch-requested(
+                                root.fetch-query,
+                                root.fetch-count,
+                                root.fetch-category-index,
+                                root.fetch-purity-index,
+                                root.fetch-sorting-index,
+                                root.fetch-atleast-index,
+                            );
+                        }
+                    }
+                    Text {
+                        text: root.fetch-status;
+                        color: #9a9a9a;
+                        font-size: 12px;
+                        vertical-alignment: center;
+                        horizontal-stretch: 1;
+                        overflow: elide;
+                    }
+                }
+
+                Text {
+                    text: "拉取会下载进本地缓存并立即出现在网格里，同时进入自动轮换队列。若远程站点无法直连，请在设置里填写 proxy。";
+                    color: #757575;
+                    font-size: 11px;
+                    wrap: word-wrap;
+                }
+            }
+        }
+
+        // ---- filters ----
+        HorizontalBox {
+            spacing: 6px;
+            Text { text: "来源"; color: #9a9a9a; font-size: 12px; vertical-alignment: center; }
+            ComboBox {
+                min-width: 112px;
+                model: ["全部来源", "远程缓存", "本地文件"];
+                current-index: root.source-index;
+                selected => {
+                    root.source-index = self.current-index;
+                    root.source-changed(self.current-index);
+                }
+            }
+            Text { text: "分辨率"; color: #9a9a9a; font-size: 12px; vertical-alignment: center; }
+            ComboBox {
+                min-width: 110px;
+                model: ["不限", "≥1080p", "≥1440p", "≥4K"];
+                current-index: root.min-resolution-index;
+                selected => {
+                    root.min-resolution-index = self.current-index;
+                    root.min-resolution-changed(self.current-index);
+                }
+            }
+            Text { text: "排序"; color: #9a9a9a; font-size: 12px; vertical-alignment: center; }
+            ComboBox {
+                min-width: 128px;
+                model: ["名称 A→Z", "名称 Z→A", "最新在前", "最旧在前", "分辨率高→低", "文件大→小"];
+                current-index: root.sort-index;
+                selected => {
+                    root.sort-index = self.current-index;
+                    root.sort-changed(self.current-index);
                 }
             }
             CheckBox {
@@ -348,11 +586,21 @@ export component WallpaperPickerWindow inherits Window {
                 checked: root.favorites-only;
                 toggled => {
                     root.favorites-only = self.checked;
-                    root.filter-changed(root.search-text, self.checked);
+                    root.favorites-toggled(self.checked);
                 }
+            }
+            Text {
+                text: root.status-text;
+                color: #9a9a9a;
+                font-size: 12px;
+                vertical-alignment: center;
+                horizontal-stretch: 1;
+                horizontal-alignment: right;
+                overflow: elide;
             }
         }
 
+        // ---- thumbnail grid ----
         Rectangle {
             vertical-stretch: 1;
             background: #1e1e1e;
@@ -368,8 +616,8 @@ export component WallpaperPickerWindow inherits Window {
                             col: Math.mod(idx, root.grid-cols);
 
                             Menu {
-                                for name[monitor-idx] in root.monitor-names: MenuItem {
-                                    title: "应用到 " + name;
+                                for monitor[monitor-idx] in root.monitors: MenuItem {
+                                    title: "应用到 " + monitor.name;
                                     activated => { root.apply-to-monitor(cell.path, monitor-idx); }
                                 }
                                 MenuItem {
@@ -381,22 +629,26 @@ export component WallpaperPickerWindow inherits Window {
                                     title: cell.favorited ? "取消收藏" : "加入收藏";
                                     activated => { root.add-favorite(cell.path); }
                                 }
+                                MenuItem {
+                                    title: "在文件夹中显示";
+                                    activated => { root.open-in-folder(cell.path); }
+                                }
                             }
 
                             Rectangle {
-                                width: 100%;
-                                height: 100%;
+                                min-width: 170px;
+                                min-height: 136px;
                                 background: root.selected-path == cell.path
                                     ? #31353d
-                                    : (select-touch.has-hover ? #2b2b2b : #262626);
+                                    : (card-touch.has-hover ? #2b2b2b : #262626);
                                 border-radius: 6px;
                                 border-width: 1px;
                                 border-color: root.selected-path == cell.path
                                     ? #4a90d9
-                                    : (cell.favorited ? #d4a017 : (select-touch.has-hover ? #4a4a4a : #3a3a3a));
+                                    : (cell.favorited ? #d4a017 : (card-touch.has-hover ? #4a4a4a : #3a3a3a));
                                 clip: true;
 
-                                select-touch := TouchArea {
+                                card-touch := TouchArea {
                                     width: 100%;
                                     height: 100%;
                                     mouse-cursor: pointer;
@@ -411,7 +663,7 @@ export component WallpaperPickerWindow inherits Window {
 
                                     Rectangle {
                                         vertical-stretch: 1;
-                                        min-height: 100px;
+                                        min-height: 96px;
 
                                         Image {
                                             source: cell.thumb;
@@ -421,17 +673,38 @@ export component WallpaperPickerWindow inherits Window {
                                         }
 
                                         Rectangle {
+                                            visible: cell.local;
+                                            x: 6px;
+                                            y: 6px;
+                                            width: 36px;
+                                            height: 18px;
+                                            border-radius: 9px;
+                                            background: #000000aa;
+                                            Text {
+                                                text: "本地";
+                                                color: #cfe3ff;
+                                                font-size: 10px;
+                                                width: 100%;
+                                                height: 100%;
+                                                horizontal-alignment: center;
+                                                vertical-alignment: center;
+                                            }
+                                        }
+
+                                        Rectangle {
                                             visible: cell.favorited;
                                             x: parent.width - self.width - 6px;
                                             y: 6px;
-                                            width: 24px;
-                                            height: 24px;
-                                            border-radius: 12px;
+                                            width: 22px;
+                                            height: 22px;
+                                            border-radius: 11px;
                                             background: #000000aa;
                                             Text {
                                                 text: "★";
                                                 color: #d4a017;
-                                                font-size: 12px;
+                                                font-size: 11px;
+                                                width: 100%;
+                                                height: 100%;
                                                 horizontal-alignment: center;
                                                 vertical-alignment: center;
                                             }
@@ -440,20 +713,23 @@ export component WallpaperPickerWindow inherits Window {
                                         Rectangle {
                                             y: parent.height - self.height;
                                             width: 100%;
-                                            height: select-touch.has-hover || root.selected-path == cell.path ? 30px : 0px;
-                                            background: #000000c4;
-                                            TouchArea {
-                                                width: 100%;
-                                                height: 30px;
-                                                visible: select-touch.has-hover || root.selected-path == cell.path;
-                                                mouse-cursor: pointer;
-                                                clicked => { root.apply-all(cell.path); }
-                                                Text {
-                                                    text: "应用到全部屏幕";
-                                                    color: #f0f0f0;
-                                                    font-size: 12px;
-                                                    horizontal-alignment: center;
-                                                    vertical-alignment: center;
+                                            height: (card-touch.has-hover || root.selected-path == cell.path) ? 30px : 0px;
+                                            background: #000000cc;
+                                            clip: true;
+
+                                            HorizontalBox {
+                                                alignment: center;
+                                                spacing: 6px;
+                                                PickerChip {
+                                                    label: "应用";
+                                                    chip-width: 60px;
+                                                    active: true;
+                                                    clicked => { root.apply-to-selection(cell.path); }
+                                                }
+                                                PickerChip {
+                                                    label: cell.favorited ? "取消收藏" : "收藏";
+                                                    chip-width: 76px;
+                                                    clicked => { root.add-favorite(cell.path); }
                                                 }
                                             }
                                         }
@@ -471,9 +747,9 @@ export component WallpaperPickerWindow inherits Window {
                                             horizontal-stretch: 1;
                                         }
                                         Text {
-                                            text: cell.favorited ? "★" : "";
-                                            color: #d4a017;
-                                            font-size: 11px;
+                                            text: cell.meta;
+                                            color: #858585;
+                                            font-size: 10px;
                                             vertical-alignment: center;
                                         }
                                     }
@@ -500,10 +776,66 @@ export component WallpaperPickerWindow inherits Window {
             }
         }
 
+        // ---- display chooser ----
+        Rectangle {
+            background: #23272e;
+            border-radius: 6px;
+            border-width: 1px;
+            border-color: #2f353d;
+
+            HorizontalBox {
+                padding: 8px;
+                spacing: 6px;
+
+                Text {
+                    text: "应用到";
+                    color: #c8c8c8;
+                    font-size: 12px;
+                    vertical-alignment: center;
+                }
+
+                if (root.monitors.length == 0): Text {
+                    text: "全部屏幕";
+                    color: #858585;
+                    font-size: 12px;
+                    vertical-alignment: center;
+                }
+
+                for monitor[idx] in root.monitors: PickerChip {
+                    label: monitor.name;
+                    active: monitor.selected;
+                    clicked => { root.toggle-monitor(idx); }
+                }
+
+                if (root.monitors.length > 0): PickerChip {
+                    label: "全选";
+                    chip-width: 56px;
+                    clicked => { root.select-all-monitors(true); }
+                }
+
+                if (root.monitors.length > 0): PickerChip {
+                    label: "清空";
+                    chip-width: 56px;
+                    clicked => { root.select-all-monitors(false); }
+                }
+
+                Text {
+                    text: root.screen-summary;
+                    color: #858585;
+                    font-size: 11px;
+                    vertical-alignment: center;
+                    horizontal-stretch: 1;
+                    horizontal-alignment: right;
+                    overflow: elide;
+                }
+            }
+        }
+
+        // ---- footer ----
         HorizontalBox {
             spacing: 8px;
             Text {
-                text: root.status-text;
+                text: root.selected-path == "" ? root.status-text : "已选择 · " + root.selected-path;
                 color: #9a9a9a;
                 font-size: 12px;
                 overflow: elide;
@@ -514,7 +846,7 @@ export component WallpaperPickerWindow inherits Window {
                 text: "应用所选";
                 primary: root.selected-path != "";
                 enabled: root.selected-path != "" && !root.loading;
-                clicked => { root.apply-all(root.selected-path); }
+                clicked => { root.apply-to-selection(root.selected-path); }
             }
             Button {
                 text: "关闭";
