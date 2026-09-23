@@ -746,29 +746,7 @@ export component WallpaperPickerWindow inherits Window {
                                             }
                                         }
 
-                                        Rectangle {
-                                            y: parent.height - self.height;
-                                            width: 100%;
-                                            height: (card-touch.has-hover || root.selected-path == cell.path) ? 30px : 0px;
-                                            background: #000000cc;
-                                            clip: true;
-
-                                            HorizontalBox {
-                                                alignment: center;
-                                                spacing: 6px;
-                                                PickerChip {
-                                                    label: "应用";
-                                                    chip-width: 60px;
-                                                    active: true;
-                                                    clicked => { root.apply-to-selection(cell.path); }
-                                                }
-                                                PickerChip {
-                                                    label: cell.favorited ? "取消收藏" : "收藏";
-                                                    chip-width: 76px;
-                                                    clicked => { root.add-favorite(cell.path); }
-                                                }
-                                            }
-                                        }
+                                        
                                     }
 
                                     HorizontalBox {

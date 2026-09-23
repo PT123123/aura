@@ -41,7 +41,12 @@ impl RotationManager {
             .retain(|id| self.pool.contains_key(id));
 
         let existing_remaining: HashSet<&str> = self.remaining.iter().map(|s| s.as_str()).collect();
-        let mut new_ids: Vec<String> = self
+        // Keep local wallpapers ahead of remote ones: build the two groups
+        // separately, shuffle each, then append locals before remotes so the
+        // rotation prefers the user's own files.
+        let mut new_local: Vec<String> = Vec::new();
+        let mut new_remote: Vec<String> = Vec::new();
+        for id in self
             .pool
             .keys()
             .filter(|id| {
@@ -49,9 +54,17 @@ impl RotationManager {
                     && !self.shown_current_cycle.contains(id.as_str())
             })
             .cloned()
-            .collect();
-        new_ids.shuffle(&mut self.rng);
-        self.remaining.extend(new_ids);
+        {
+            if self.pool.get(&id).map(|c| c.is_local()).unwrap_or(false) {
+                new_local.push(id);
+            } else {
+                new_remote.push(id);
+            }
+        }
+        new_local.shuffle(&mut self.rng);
+        new_remote.shuffle(&mut self.rng);
+        self.remaining.extend(new_local);
+        self.remaining.extend(new_remote);
 
         if self.remaining.is_empty() {
             self.refill_cycle();
@@ -159,14 +172,25 @@ impl RotationManager {
             self.shown_current_cycle.clear();
         }
 
-        let mut ids: Vec<String> = self
+        // Build the cycle with local wallpapers first, then remote ones; each
+        // group is shuffled so the order within a group stays random.
+        let mut local_ids: Vec<String> = Vec::new();
+        let mut remote_ids: Vec<String> = Vec::new();
+        for id in self
             .pool
             .keys()
             .filter(|id| !self.shown_current_cycle.contains(id.as_str()))
             .cloned()
-            .collect();
-        ids.shuffle(&mut self.rng);
-        self.remaining = ids.into_iter().collect();
+        {
+            if self.pool.get(&id).map(|c| c.is_local()).unwrap_or(false) {
+                local_ids.push(id);
+            } else {
+                remote_ids.push(id);
+            }
+        }
+        local_ids.shuffle(&mut self.rng);
+        remote_ids.shuffle(&mut self.rng);
+        self.remaining = local_ids.into_iter().chain(remote_ids).collect();
     }
 }
 
@@ -195,6 +219,28 @@ mod tests {
             let next = rotation.next().unwrap();
             assert!(seen.insert(next.id));
         }
+    }
+
+    #[test]
+    fn local_candidates_come_first_in_cycle() {
+        let mut rotation = RotationManager::new();
+        let local_a = candidate("a");
+        let local_b = candidate("b");
+        let remote = ImageCandidate::rss(
+            "r".to_string(),
+            "http://example.com/r.jpg".to_string(),
+            PathBuf::from("cache"),
+            None,
+        );
+        rotation.rebuild_pool(vec![remote.clone(), local_a.clone(), local_b.clone()]);
+
+        // The cycle is locals-first: the first two picks must be the local
+        // wallpapers (in either order); the remote one only shows up after.
+        let first = rotation.next().unwrap();
+        let second = rotation.next().unwrap();
+        let third = rotation.next().unwrap();
+        assert!(first.is_local() && second.is_local());
+        assert!(!third.is_local());
     }
 
     #[test]

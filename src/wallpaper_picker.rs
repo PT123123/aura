@@ -20,7 +20,10 @@ use crate::sources::wallhaven::WallhavenSource;
 use crate::sources::ImageSource;
 use crate::tray::TrayEvent;
 use anyhow::Context;
-use slint::{ComponentHandle, Image as SlintImage, ModelRc, SharedString, VecModel};
+use slint::{
+    ComponentHandle, Image as SlintImage, ModelRc, Rgba8Pixel, SharedPixelBuffer, SharedString,
+    VecModel,
+};
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -512,24 +515,27 @@ fn spawn_scan(
 
     thread::spawn(move || {
         let mut paths: Vec<(PathBuf, bool)> = Vec::new();
-        match cache.list_remote_images() {
-            Ok(images) => paths.extend(images.into_iter().map(|path| (path, false))),
-            Err(error) => warn!(error = %error, "failed to list remote cache images"),
-        }
+        // Local sources first so the user's own wallpapers fill the grid
+        // immediately, with remote cache images streaming in afterwards.
         paths.extend(
             collect_local_images(&local_sources)
                 .into_iter()
                 .map(|path| (path, true)),
         );
+        match cache.list_remote_images() {
+            Ok(images) => paths.extend(images.into_iter().map(|path| (path, false))),
+            Err(error) => warn!(error = %error, "failed to list remote cache images"),
+        }
 
-        let mut batch: Vec<PickerEntry> = Vec::with_capacity(PROGRESS_BATCH);
+        let mut batch: Vec<(PickerEntry, Option<(u32, u32, Vec<u8>)>)> =
+            Vec::with_capacity(PROGRESS_BATCH);
         let mut total = 0usize;
         let mut reset = true;
         for (path, local) in paths {
-            let Some(entry) = probe_entry(&path, local) else {
+            let Some((entry, thumb_rgba)) = probe_entry(&path, local) else {
                 continue;
             };
-            batch.push(entry);
+            batch.push((entry, thumb_rgba));
             total += 1;
             if batch.len() >= PROGRESS_BATCH {
                 push_batch(
@@ -552,7 +558,7 @@ fn spawn_scan(
 fn push_batch(
     ui_weak: &slint::Weak<WallpaperPickerWindow>,
     state: &Arc<Mutex<PickerState>>,
-    batch: Vec<PickerEntry>,
+    batch: Vec<(PickerEntry, Option<(u32, u32, Vec<u8>)>)>,
     reset: bool,
     done: bool,
 ) {
@@ -566,7 +572,12 @@ fn push_batch(
             if reset {
                 guard.entries.clear();
             }
-            guard.entries.extend(batch);
+            for (entry, thumb_rgba) in batch {
+                // Build + cache the thumbnail image on the UI thread, but purely
+                // from in-memory RGBA bytes when available — no file IO here.
+                let _ = cached_thumbnail(&entry.thumb_path, thumb_rgba.as_ref());
+                guard.entries.push(entry);
+            }
         }
         refresh_cells(&ui, &state);
         if done {
@@ -621,7 +632,7 @@ fn refresh_cells(ui: &WallpaperPickerWindow, state: &Arc<Mutex<PickerState>>) {
 
     let mut cells: Vec<WallpaperCell> = Vec::with_capacity(visible.len());
     for entry in visible {
-        let Some(thumb) = cached_thumbnail(&entry.thumb_path) else {
+        let Some(thumb) = cached_thumbnail(&entry.thumb_path, None) else {
             continue;
         };
         cells.push(WallpaperCell {
@@ -656,20 +667,45 @@ fn sort_entries(entries: &mut [&PickerEntry], sort_index: i32) {
 }
 
 /// Load a thumbnail through the UI-thread cache, decoding it at most once.
-fn cached_thumbnail(thumb_path: &str) -> Option<SlintImage> {
+fn cached_thumbnail(
+    thumb_path: &str,
+    rgba: Option<&(u32, u32, Vec<u8>)>,
+) -> Option<SlintImage> {
     THUMB_CACHE.with(|cache| {
         let mut cache = cache.borrow_mut();
         if let Some(image) = cache.get(thumb_path) {
             return Some(image.clone());
         }
-        let image = SlintImage::load_from_path(Path::new(thumb_path)).ok()?;
+        // Build the image from in-memory RGBA bytes whenever we have them
+        // (decoded on the scan worker), so the UI thread never does disk IO.
+        let image = match rgba {
+            Some((width, height, buffer)) => {
+                let mut pixel_buffer = SharedPixelBuffer::<Rgba8Pixel>::new(*width, *height);
+                for (destination, source) in pixel_buffer
+                    .make_mut_slice()
+                    .iter_mut()
+                    .zip(buffer.chunks_exact(4))
+                {
+                    *destination = Rgba8Pixel {
+                        r: source[0],
+                        g: source[1],
+                        b: source[2],
+                        a: source[3],
+                    };
+                }
+                SlintImage::from_rgba8(pixel_buffer)
+            }
+            None => SlintImage::load_from_path(Path::new(thumb_path)).ok()?,
+        };
         cache.insert(thumb_path.to_string(), image.clone());
         Some(image)
     })
 }
 
-/// Read dimensions / size / mtime and make (or reuse) a thumbnail.
-fn probe_entry(path: &Path, local: bool) -> Option<PickerEntry> {
+/// Read dimensions / size / mtime, make (or reuse) a thumbnail, and return the
+/// entry together with the thumbnail's raw RGBA bytes. The bytes are decoded
+/// here on the scan worker, never on the UI thread.
+fn probe_entry(path: &Path, local: bool) -> Option<(PickerEntry, Option<(u32, u32, Vec<u8>)>)> {
     let (width, height) = image::image_dimensions(path).ok()?;
     let metadata = std::fs::metadata(path).ok()?;
     let modified = metadata
@@ -678,44 +714,70 @@ fn probe_entry(path: &Path, local: bool) -> Option<PickerEntry> {
         .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
         .map(|duration| duration.as_secs())
         .unwrap_or(0);
-    let thumb_path = make_thumbnail(path)?;
+    let (thumb_path, thumb_rgba) = make_thumbnail(path)?;
     let name = path
         .file_name()
         .map(|value| value.to_string_lossy().into_owned())
         .unwrap_or_default();
 
-    Some(PickerEntry {
-        path: path.to_string_lossy().into_owned(),
-        name,
-        thumb_path,
-        local,
-        width,
-        height,
-        bytes: metadata.len(),
-        modified,
-    })
+    Some((
+        PickerEntry {
+            path: path.to_string_lossy().into_owned(),
+            name,
+            thumb_path,
+            local,
+            width,
+            height,
+            bytes: metadata.len(),
+            modified,
+        },
+        thumb_rgba,
+    ))
 }
 
-/// Create (or reuse) a thumbnail file; returns the thumbnail path.
-fn make_thumbnail(path: &Path) -> Option<String> {
+/// Create (or reuse) a thumbnail file and return it together with the decoded
+/// RGBA pixels. The decoding happens on the scan worker so the UI thread only
+/// ever does an in-memory copy when building the `slint::Image`.
+fn make_thumbnail(path: &Path) -> Option<(String, Option<(u32, u32, Vec<u8>)>)> {
     let dir = std::env::temp_dir().join("aura-wallpaper-thumbs");
     std::fs::create_dir_all(&dir).ok()?;
     let key = blake3::hash(path.to_string_lossy().as_bytes())
         .to_hex()
         .to_string();
     let output = dir.join(format!("{key}.png"));
-    if !output.exists() {
+
+    let rgba = if !output.exists() {
         let source = image::open(path).ok()?;
         let (width, height) = image::GenericImageView::dimensions(&source);
         let scale = THUMB_WIDTH as f32 / width as f32;
         let target_height = (height as f32 * scale).max(1.0) as u32;
         let thumbnail = source.thumbnail(THUMB_WIDTH, target_height);
-        if let Err(error) = thumbnail.save(&output) {
-            warn!(error = %error, path = %path.display(), "failed to save wallpaper thumbnail");
-            return None;
+        match thumbnail.save(&output) {
+            Ok(()) => {
+                let rgba8 = thumbnail.into_rgba8();
+                let (w, h) = (rgba8.width(), rgba8.height());
+                Some((w, h, rgba8.into_raw()))
+            }
+            Err(error) => {
+                warn!(error = %error, path = %path.display(), "failed to save wallpaper thumbnail");
+                None
+            }
         }
-    }
-    Some(output.to_string_lossy().into_owned())
+    } else {
+        match image::open(&output) {
+            Ok(image) => {
+                let rgba8 = image.into_rgba8();
+                let (w, h) = (rgba8.width(), rgba8.height());
+                Some((w, h, rgba8.into_raw()))
+            }
+            Err(error) => {
+                warn!(error = %error, path = %output.display(), "failed to read cached wallpaper thumbnail");
+                None
+            }
+        }
+    };
+
+    Some((output.to_string_lossy().into_owned(), rgba))
 }
 
 fn format_bytes(bytes: u64) -> String {

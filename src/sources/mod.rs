@@ -90,6 +90,12 @@ impl ImageCandidate {
         matches!(self.location, ImageLocation::Rss { .. })
     }
 
+    /// `true` for wallpapers that live on a local file/directory source,
+    /// `false` for anything fetched into the remote cache (RSS, Wallhaven).
+    pub fn is_local(&self) -> bool {
+        matches!(self.origin, Origin::File | Origin::Directory)
+    }
+
     #[cfg(test)]
     pub fn cached_local_path(&self) -> Result<Option<PathBuf>> {
         self.local_path()
