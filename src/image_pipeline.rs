@@ -115,6 +115,7 @@ mod tests {
             renderer: RendererMode::Image,
             shader: None,
             proxy: None,
+            tray_double_click: crate::config::TrayDoubleClickAction::Next,
         };
         CacheManager::new(&config).unwrap()
     }

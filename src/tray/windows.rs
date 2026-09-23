@@ -1,3 +1,4 @@
+use crate::config::TrayDoubleClickAction;
 use crate::errors::Result;
 use crate::tray::{SessionStats, TrayEvent};
 use anyhow::{anyhow, bail};
@@ -134,6 +135,7 @@ struct WindowData {
     event_tx: UnboundedSender<TrayEvent>,
     session_stats: Arc<SessionStats>,
     hinstance: HINSTANCE,
+    config_path: PathBuf,
 }
 
 fn run_tray_loop(
@@ -161,11 +163,11 @@ fn run_tray_loop(
         return Ok(());
     }
 
-    let _ = config_path;
     let user_data = Box::new(WindowData {
         event_tx,
         session_stats: session_stats.clone(),
         hinstance,
+        config_path: config_path.clone(),
     });
     let user_data_ptr = Box::into_raw(user_data);
 
@@ -252,7 +254,14 @@ unsafe extern "system" fn wnd_proc(
                 match event_code {
                     WM_LBUTTONDBLCLK => {
                         if !data.session_stats.is_shader_active() {
-                            let _ = data.event_tx.send(TrayEvent::NextWallpaper);
+                            match crate::config::read_tray_double_click(&data.config_path) {
+                                TrayDoubleClickAction::Next => {
+                                    let _ = data.event_tx.send(TrayEvent::NextWallpaper);
+                                }
+                                TrayDoubleClickAction::Picker => {
+                                    let _ = data.event_tx.send(TrayEvent::OpenWallpaperPicker);
+                                }
+                            }
                         }
                     }
                     WM_RBUTTONUP => {

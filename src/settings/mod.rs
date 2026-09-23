@@ -9,6 +9,7 @@
 
 use crate::config::{
     AuraConfig, OutputFormat, RendererMode, ShaderColorSpace, ShaderDesktopScope, SourceConfig,
+    TrayDoubleClickAction,
 };
 use crate::errors::Result;
 use crate::tray::TrayEvent;
@@ -183,6 +184,7 @@ fn fill_ui_from_config(ui: &SettingsWindow, config: &AuraConfig) {
     ui.set_cache_dir(config.cache_dir.to_string_lossy().into_owned().into());
     ui.set_state_file(config.state_file.to_string_lossy().into_owned().into());
     ui.set_proxy_url(config.proxy.clone().unwrap_or_default().into());
+    ui.set_tray_double_click_index(tray_double_click_index(config.tray_double_click));
     fill_wallhaven_from_config(ui, config);
 }
 
@@ -377,6 +379,12 @@ fn save_config_from_ui(ui: &SettingsWindow, config_path: &Path) -> Result<()> {
     )?;
     set_object_string(&mut root, "updater", "feedUrl", &ui.get_feed_url())?;
     set_object_string(&mut root, "", "log_level", log_level_str(ui.get_log_level_index()))?;
+    set_object_string(
+        &mut root,
+        "",
+        "tray_double_click",
+        tray_double_click_str(ui.get_tray_double_click_index()),
+    )?;
 
     // An empty proxy field removes the key entirely so the environment
     // variables stay in charge instead of an empty override.
@@ -431,6 +439,20 @@ fn log_level_str(index: i32) -> &'static str {
         3 => "debug",
         4 => "trace",
         _ => "info",
+    }
+}
+
+fn tray_double_click_str(index: i32) -> &'static str {
+    match index {
+        1 => "picker",
+        _ => "next",
+    }
+}
+
+fn tray_double_click_index(action: TrayDoubleClickAction) -> i32 {
+    match action {
+        TrayDoubleClickAction::Picker => 1,
+        TrayDoubleClickAction::Next => 0,
     }
 }
 

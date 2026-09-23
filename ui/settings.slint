@@ -39,6 +39,7 @@ export component SettingsWindow inherits Window {
     in-out property <string> cache-dir: "";
     in-out property <string> state-file: "";
     in-out property <string> proxy-url: "";
+    in-out property <int> tray-double-click-index: 0;
     in-out property <string> status-text: "";
 
     callback save();
@@ -279,6 +280,21 @@ export component SettingsWindow inherits Window {
                         }
                         Text {
                             text: "远程图源（RSS / Wallhaven）走这个代理；保存并重载后生效。";
+                            color: #8a8a8a;
+                            font-size: 11px;
+                            wrap: word-wrap;
+                        }
+                        HorizontalBox {
+                            spacing: 8px;
+                            Text { text: "双击托盘图标"; color: #e0e0e0; vertical-alignment: center; }
+                            ComboBox {
+                                model: ["切换下一张 (默认)", "打开选择壁纸界面"];
+                                current-index: root.tray-double-click-index;
+                                selected => { root.tray-double-click-index = self.current-index; }
+                            }
+                        }
+                        Text {
+                            text: "默认双击切换下一张；改完后保存并重载生效。";
                             color: #8a8a8a;
                             font-size: 11px;
                             wrap: word-wrap;

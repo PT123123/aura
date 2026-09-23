@@ -37,6 +37,18 @@ impl OutputFormat {
     }
 }
 
+/// What a double-click on the tray icon does.
+///
+/// Defaults to `Next` (switch to the next wallpaper); the other option, `Picker`,
+/// opens the wallpaper picker window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum TrayDoubleClickAction {
+    #[default]
+    Next,
+    Picker,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum RendererMode {
@@ -156,6 +168,7 @@ struct RawConfig {
     renderer: Option<Lenient<RendererMode>>,
     shader: Option<Lenient<RawShaderConfig>>,
     proxy: Option<Lenient<String>>,
+    tray_double_click: Option<Lenient<TrayDoubleClickAction>>,
     #[serde(flatten)]
     extra: hcl::Map<String, hcl::Value>,
 }
@@ -211,6 +224,8 @@ pub struct AuraConfig {
     /// blocked, so a local proxy can be configured explicitly instead of
     /// relying on the `HTTPS_PROXY` environment variables alone.
     pub proxy: Option<String>,
+    /// What a double-click on the tray icon does. Defaults to `Next`.
+    pub tray_double_click: TrayDoubleClickAction,
 }
 
 #[derive(Debug, Clone)]
@@ -284,6 +299,18 @@ pub fn load_from_path_with_warnings(path: &Path) -> Result<ConfigWithWarnings> {
     parse_from_str_with_warnings(&content, path)
 }
 
+/// Reads only the tray double-click action from disk.
+///
+/// The tray thread uses this on each double-click so it always acts on the
+/// latest setting without a full config reload (which lives on the main loop).
+/// Returns the default (`Next`) when the file is missing or unparsable.
+pub fn read_tray_double_click(path: &Path) -> TrayDoubleClickAction {
+    match load_from_path_with_warnings(path) {
+        Ok(parsed) => parsed.config.tray_double_click,
+        Err(_) => TrayDoubleClickAction::default(),
+    }
+}
+
 #[cfg(test)]
 pub(crate) fn parse_from_str(content: &str, path: &Path) -> Result<AuraConfig> {
     Ok(parse_from_str_with_warnings(content, path)?.config)
@@ -344,6 +371,10 @@ updater = {{
 # Remote hosts can be unreachable without one; falls back to the
 # HTTPS_PROXY / HTTP_PROXY environment variables when unset.
 #proxy = "http://127.0.0.1:10809"
+
+# Tray icon double-click action: "next" (switch to the next wallpaper) | "picker" (open the wallpaper picker).
+# Uncomment to change; reload settings for it to take effect.
+#tray_double_click = "next"
 "#,
         pictures
     )
@@ -447,6 +478,14 @@ impl AuraConfig {
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty());
 
+        let tray_double_click = take_lenient(
+            "tray_double_click",
+            raw.tray_double_click,
+            &mut warnings,
+            "using default double-click action (next wallpaper)",
+        )
+        .unwrap_or_default();
+
         Ok(ConfigWithWarnings {
             config: Self {
                 image,
@@ -459,6 +498,7 @@ impl AuraConfig {
                 renderer,
                 shader,
                 proxy,
+                tray_double_click,
             },
             warnings,
         })
@@ -1685,5 +1725,46 @@ image = {{
 
         let parsed = parse_from_str_with_warnings(&raw, &tmp.path().join("aura.hcl")).unwrap();
         assert!(has_warning(&parsed.warnings, "timer"));
+    }
+
+    #[test]
+    fn parses_tray_double_click_action() {
+        let tmp = tempdir().unwrap();
+        let dir = tmp.path().join("imgs");
+        fs::create_dir_all(&dir).unwrap();
+
+        let raw = format!(
+            r#"
+tray_double_click = "picker"
+image = {{
+  sources = [ {{ type = "directory", path = "{}" }} ]
+}}
+"#,
+            hcl_path(&dir)
+        );
+        let cfg = parse_from_str(&raw, &tmp.path().join("aura.hcl")).unwrap();
+        assert_eq!(cfg.tray_double_click, crate::config::TrayDoubleClickAction::Picker);
+
+        let defaults = parse_from_str("", &tmp.path().join("aura.hcl")).unwrap();
+        assert_eq!(
+            defaults.tray_double_click,
+            crate::config::TrayDoubleClickAction::Next
+        );
+
+        let bad = format!(
+            r#"
+tray_double_click = "open-the-moon"
+image = {{
+  sources = [ {{ type = "directory", path = "{}" }} ]
+}}
+"#,
+            hcl_path(&dir)
+        );
+        let parsed = parse_from_str_with_warnings(&bad, &tmp.path().join("aura.hcl")).unwrap();
+        assert_eq!(
+            parsed.config.tray_double_click,
+            crate::config::TrayDoubleClickAction::Next
+        );
+        assert!(has_warning(&parsed.warnings, "tray_double_click"));
     }
 }
