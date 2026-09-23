@@ -1,5 +1,7 @@
 dist/
 /aura.hcl
+.workbuddy/
+__pycache__/
 /shaders/**/target
 /shaders/*.spv
 /shaders/**/Cargo.lock
